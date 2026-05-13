@@ -1,0 +1,45 @@
+[project]
+name = "odin"
+version = "1.0.0"
+description = "The many-named one"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "Guillaume Filion", email = "guillaume.filion@gmail.com"}
+]
+dependencies = [
+    "torch>=2.12.0",
+    "transformers>=5.8.1",
+    "tokenizers>=0.22.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.15.2",
+    "ty==0.0.18",
+    "pytest>=8.3.4",
+    "pre-commit>=3.3.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odin"]
+
+[tool.ty.rules]
+unresolved-import = "ignore"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "test", "test_llm"]
+extend-exclude = ["test_scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

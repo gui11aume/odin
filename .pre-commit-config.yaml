@@ -1,0 +1,65 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+# Don't run pre-commit on files under third-party/
+exclude: "^\
+  (third-party/.*)\
+  "
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-toml # Checks toml files for parseable syntax
+      - id: check-json # Checks json files for parseable syntax
+      - id: check-added-large-files # Prevents giant files from being committed
+      - id: check-case-conflict # Checks for files that would conflict in case-insensitive filesystems
+      - id: check-merge-conflict # Checks for files that contain merge conflict strings
+      - id: check-yaml # Checks yaml files for parseable syntax
+      - id: detect-private-key # Detects the presence of private keys
+      - id: end-of-file-fixer # Ensures that a file is either empty, or ends with one newline
+      - id: fix-byte-order-marker # Removes utf-8 byte order marker
+      - id: mixed-line-ending # Replaces or checks mixed line ending
+      - id: trailing-whitespace # Trims trailing whitespace
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff-fix-and-format
+        entry: bash
+        args:
+          - -c
+          - make lint FILES="$*" && make format FILES="$*"
+          - --
+        language: system
+        pass_filenames: true
+        types_or: [python, pyi]
+      - id: ty
+        name: ty-check
+        entry: uv run --extra dev ty check src
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.3
+    hooks:
+      - id: bandit
+        args:
+          [
+            "-f",
+            "custom",
+            "-o",
+            "bandit-report.txt",
+            "-x",
+            "test/,test_scripts/",
+            "--recursive",
+            "--severity-level",
+            "medium",
+          ]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"] # Scans for secrets using a baseline file
+        exclude: ^test/data/
