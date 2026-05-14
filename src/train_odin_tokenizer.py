@@ -9,6 +9,7 @@ from tokenizers.pre_tokenizers import Digits, Whitespace
 # https://huggingface.co/docs/tokenizers/python/latest/pipeline.html
 
 VOCAB_SIZE = 8192
+LIMIT_ALPHABET = 4096
 
 
 if __name__ == "__main__":
@@ -27,10 +28,11 @@ if __name__ == "__main__":
 
     trainer = WordPieceTrainer(
         vocab_size=VOCAB_SIZE,
+        limit_alphabet=LIMIT_ALPHABET,
         special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"],
     )
 
     with gzip.open(data_path, "rt") as f:
         tokenizer.train_from_iterator(f, trainer=trainer)
 
-    tokenizer.save("fr_tokenizer.json")
+    tokenizer.save("odin_tokenizer.json")
