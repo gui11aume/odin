@@ -50,8 +50,6 @@ repos:
             "custom",
             "-o",
             "bandit-report.txt",
-            "-x",
-            "test/,test_scripts/",
             "--recursive",
             "--severity-level",
             "medium",

@@ -1,5 +1,5 @@
 PYTHON_VERSION := 3.10
-UV_VERSION := 0.9.20
+UV_VERSION := 0.12.5
 
 .PHONY: install \
 	test test-cov \
