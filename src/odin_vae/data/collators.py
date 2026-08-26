@@ -2,13 +2,19 @@
 
 For each cluster in the batch the collator:
 
-1. samples ``k_input`` cells uniformly at random -> encoder inputs,
+1. draws ``k`` uniformly from ``1..k_input`` and samples ``k`` cells uniformly
+   at random -> encoder inputs (real patent families have one surface per
+   member, from 1 upwards),
 2. samples ``k_latin_target`` latin cells + ``k_non_latin_target`` non-latin
    cells -> decoder targets (stratified, disjoint from the inputs when the
    cluster is large enough; backfilled otherwise),
-3. corrupts the letters of the selected cells (per the LetterAugmenter; CJK
+3. flips a coin per target: with probability 1/2 the target is tag-primed
+   (the decoder is seeded with the script tag, as in inference with a known
+   alphabet), otherwise it is unprimed (decode from the latent alone, as in
+   log-probability computation with an unknown alphabet),
+4. corrupts the letters of the selected cells (per the LetterAugmenter; CJK
    cells are never corrupted),
-4. tokenizes (tag token prepended for inputs only) and right-pads.
+5. tokenizes (tag token prepended for inputs only) and right-pads.
 
 The per-sample RNG is seeded from the global seed, the worker id, a
 batch counter, and a hash of the cluster key: corruption and sampling are
@@ -92,18 +98,23 @@ class OdinVAECollator:
     def _select(self, tags: list[str], n: int, rng: random.Random) -> tuple[list[int], list[int]]:
         """Return (input indices, target indices) for one cluster.
 
+        The number of inputs is drawn uniformly from ``1..k_input`` (a random
+        subset of the ``k_input`` candidates, so the disjointness from the
+        targets — computed against the full candidate set — is preserved).
         The targets are always exactly ``k_latin_target + k_non_latin_target``
         (the model relies on a fixed count per cluster); each target keeps
         its own true script tag.
         """
-        input_idx = rng.sample(range(n), min(self.k_input, n))
+        input_candidates = rng.sample(range(n), min(self.k_input, n))
         latin = [j for j in range(n) if tags[j] == LATIN_SCRIPT]
         non_latin = [j for j in range(n) if tags[j] != LATIN_SCRIPT]
         any_cell = list(range(n))
-        used = set(input_idx)
+        used = set(input_candidates)
         targets = self._pick(latin, used, self.k_latin_target, non_latin, any_cell, rng)
         used.update(targets)
         targets += self._pick(non_latin, used, self.k_non_latin_target, latin, any_cell, rng)
+        k = rng.randint(1, self.k_input)
+        input_idx = rng.sample(input_candidates, min(k, len(input_candidates)))
         return input_idx, targets
 
     def _tokenize(self, text: str, tag: str | None) -> list[int]:
@@ -122,15 +133,20 @@ class OdinVAECollator:
 
         surface_rows: list[tuple[str, str]] = []
         target_rows: list[tuple[str, str]] = []
+        target_primed: list[int] = []
+        k_per_cluster: list[int] = []
         for position, example in enumerate(examples):
             tags: list[str] = example["tags"]
             cells: list[str] = example["cells"]
             n = len(cells)
             rng = self._rng_for(worker_id, position, example["key"])
             input_idx, target_idx = self._select(tags, n, rng)
+            k_per_cluster.append(len(input_idx))
             for j in input_idx:
                 surface_rows.append((tags[j], self.augmenter.corrupt(tags[j], cells[j], rng)))
             for j in target_idx:
+                # 50% tag-primed (alphabet known) / 50% unprimed (alphabet unknown).
+                target_primed.append(1 if rng.random() < 0.5 else 0)
                 target_rows.append((tags[j], self.augmenter.corrupt(tags[j], cells[j], rng)))
         self._batch_idx += 1
 
@@ -152,8 +168,9 @@ class OdinVAECollator:
         return {
             "surf_ids": surf_ids_t,
             "surf_mask": surf_mask_t,
+            "k_per_cluster": torch.tensor(k_per_cluster, dtype=torch.long),
             "target_ids": tgt_ids_t,
             "target_mask": tgt_mask_t,
             "target_tags": torch.tensor(tgt_tags, dtype=torch.long),
-            "n_clusters": len(examples),
+            "target_primed": torch.tensor(target_primed, dtype=torch.long),
         }

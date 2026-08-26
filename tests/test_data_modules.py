@@ -157,13 +157,18 @@ def test_generate_from_real_cluster(shard_root: Path, device: str = "cpu") -> No
     batch = next(iter(datamodule.train_dataloader()))
     model = make_model(device)
     model.eval()
-    b = int(batch["n_clusters"])
-    k_in = batch["surf_ids"].shape[0] // b
+    k0 = int(batch["k_per_cluster"][0])
     with torch.no_grad():
-        mu, _ = model.encode(batch["surf_ids"][:k_in].to(device), batch["surf_mask"][:k_in].to(device), k=k_in)
+        mu, _ = model.encode(
+            batch["surf_ids"][:k0].to(device),
+            batch["surf_mask"][:k0].to(device),
+            k_per_cluster=batch["k_per_cluster"][:1].to(device),
+        )
     tag_id = tokenizer.convert_tokens_to_ids("[gk]")
     ids = model.generate(mu[0], tag_id, max_new_tokens=8)
+    ids_unprimed = model.generate(mu[0], None, max_new_tokens=8)
     assert len(ids) <= 8
+    assert len(ids_unprimed) <= 8
     text = tokenizer.decode(ids, skip_special_tokens=True)
     assert isinstance(text, str)
     sys.stdout.write(f"generated greek surface: {text!r}\n")

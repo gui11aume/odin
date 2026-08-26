@@ -164,8 +164,9 @@ class OdinVAELightningHarness(pl.LightningModule):
             surf_ids[i, : len(row)] = torch.tensor(row, dtype=torch.long)
             surf_mask[i, : len(row)] = 1
         device = next(self.model.parameters()).device
+        k_per_cluster = torch.full((1,), len(ids), dtype=torch.long)
         with torch.no_grad():
-            mu, _ = self.model.encode(surf_ids.to(device), surf_mask.to(device), k=len(ids))
+            mu, _ = self.model.encode(surf_ids.to(device), surf_mask.to(device), k_per_cluster=k_per_cluster)
         return mu[0]
 
     def _log_generations(self, kind: str) -> None:
@@ -192,6 +193,15 @@ class OdinVAELightningHarness(pl.LightningModule):
                 )
                 text = self.tokenizer.decode(ids, skip_special_tokens=True)
                 lines.append(f"  [{tag}] {text}")
+            # Unprimed decode: no alphabet information, the unknown-alphabet regime.
+            ids = self.model.generate(
+                mu,
+                None,
+                max_new_tokens=self.generation_max_new_tokens,
+                temperature=self.generation_temperature,
+            )
+            text = self.tokenizer.decode(ids, skip_special_tokens=True)
+            lines.append(f"  [unprimed] {text}")
         if self.logger.log_dir:
             out_dir = Path(self.logger.log_dir) / "generations"
             out_dir.mkdir(parents=True, exist_ok=True)

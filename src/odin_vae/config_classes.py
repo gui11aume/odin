@@ -57,11 +57,14 @@ class ConfigForDatasetSplit(pydantic.BaseModel):
 class ConfigForAugmentation(pydantic.BaseModel):
     """Per-step cell sampling and letter corruption settings.
 
-    Each training step encodes ``k_input`` cells sampled uniformly from the
-    cluster and decodes ``k_latin_target`` latin cells plus
-    ``k_non_latin_target`` non-latin cells sampled the same way (stratified
-    to avoid representation bias). Inputs and targets are kept disjoint when
-    the cluster is large enough.
+    Each training step encodes ``k`` cells (``k`` drawn uniformly from
+    ``1..k_input``) sampled uniformly from the cluster — real patent
+    families have one surface per member, from one upwards — and decodes
+    ``k_latin_target`` latin cells plus ``k_non_latin_target`` non-latin
+    cells sampled the same way (stratified to avoid representation bias).
+    Each target is tag-primed with probability 1/2 (known-alphabet regime)
+    and unprimed otherwise (unknown-alphabet regime). Inputs and targets are
+    kept disjoint when the cluster is large enough.
     """
 
     model_config = pydantic.ConfigDict(extra="forbid")
@@ -70,7 +73,9 @@ class ConfigForAugmentation(pydantic.BaseModel):
     confusion_weight: float = pydantic.Field(
         default=0.7, ge=0.0, le=1.0, description="P(substitution drawn from the visual-confusion class)."
     )
-    k_input: int = pydantic.Field(default=4, ge=1)
+    k_input: int = pydantic.Field(
+        default=4, ge=1, description="Max input cells per cluster; k is drawn uniformly from 1..k_input."
+    )
     k_latin_target: int = pydantic.Field(default=4, ge=0)
     k_non_latin_target: int = pydantic.Field(default=2, ge=0)
     max_surface_tokens: int = pydantic.Field(default=128, ge=2)

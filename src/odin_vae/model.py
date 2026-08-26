@@ -118,40 +118,70 @@ class OdinModel(nn.Module):
     # ------------------------------------------------------------------ #
     # Encoder side
     # ------------------------------------------------------------------ #
-    def _pool(self, v: torch.Tensor) -> torch.Tensor:
-        """Permutation-invariant pooling of per-surface vectors ``(B, K, d)``."""
-        dim = v.shape[-1]
+    def _cluster_pool(self, v: torch.Tensor, k_per_cluster: torch.Tensor) -> torch.Tensor:
+        """Permutation-invariant PMA pooling of variable-size clusters.
+
+        Args:
+            v: ``(N, d)`` per-surface vectors, rows laid out cluster-major.
+            k_per_cluster: ``(B,)`` surfaces per cluster (``sum == N``).
+
+        The learned query is scored per row; the softmax is taken per cluster
+        (masked to the cluster's own rows, stabilized by its max score), so
+        clusters with different surface counts pool correctly.
+        """
+        n, dim = v.shape
+        b = k_per_cluster.shape[0]
+        device = v.device
+        starts = torch.cat([torch.zeros(1, dtype=torch.long, device=device), k_per_cluster.cumsum(0)[:-1]])
+        arange = torch.arange(n, device=device)
+        cluster_of_row = torch.searchsorted(starts, arange, right=True) - 1
         scores = (v * self.pool_query).sum(-1) / (dim**0.5)
-        weights = F.softmax(scores, dim=1)
-        return (weights.unsqueeze(-1) * v).sum(1)
+        cluster_max = torch.full((b,), float("-inf"), device=device).scatter_reduce(
+            0, cluster_of_row, scores, reduce="amax", include_self=False
+        )
+        exp_s = torch.exp(scores - cluster_max[cluster_of_row])
+        w_sum = torch.zeros(b, device=device).index_add_(0, cluster_of_row, exp_s)
+        weights = exp_s / w_sum[cluster_of_row]
+        return torch.zeros(b, dim, device=device).index_add_(0, cluster_of_row, weights.unsqueeze(-1) * v)
 
     def encode(
         self,
         surf_ids: torch.Tensor,
         surf_mask: torch.Tensor,
         *,
+        k_per_cluster: torch.Tensor | None = None,
         k: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode a batch of surfaces into ``(mu, logvar)``.
 
         Args:
-            surf_ids: ``(N, L)`` token ids, tag token prepended per surface.
+            surf_ids: ``(N, L)`` token ids, tag token prepended per surface,
+                rows laid out cluster-major.
             surf_mask: ``(N, L)`` with 1 for real tokens (including the tag).
-            k: Surfaces per cluster (rows ``b*k .. b*k+k-1`` form cluster
-                ``b``); ``None`` treats all rows as one cluster.
+            k_per_cluster: ``(B,)`` surfaces per cluster (``sum == N``).
+            k: Uniform shortcut for ``k_per_cluster`` (rows ``b*k..b*k+k-1``
+                form cluster ``b``); ``None`` with ``k_per_cluster=None``
+                treats all rows as one cluster.
 
         Returns:
-            ``(mu, logvar)`` of shape ``(N // k, d)``.
+            ``(mu, logvar)`` of shape ``(B, d)``.
         """
         n = surf_ids.shape[0]
-        if k is None:
-            k = n
-        if k <= 0 or n % k != 0:
-            raise ValueError(f"n ({n}) must be a positive multiple of k ({k}).")
+        if k_per_cluster is None:
+            if k is None:
+                k_per_cluster = torch.full((1,), n, device=surf_ids.device, dtype=torch.long)
+            else:
+                if k <= 0 or n % k != 0:
+                    raise ValueError(f"n ({n}) must be a positive multiple of k ({k}).")
+                k_per_cluster = torch.full((n // k,), k, device=surf_ids.device, dtype=torch.long)
+        else:
+            k_per_cluster = k_per_cluster.to(surf_ids.device, dtype=torch.long)
+            if int(k_per_cluster.sum()) != n:
+                raise ValueError(f"sum(k_per_cluster) ({int(k_per_cluster.sum())}) != n ({n}).")
         hidden = self.encoder(input_ids=surf_ids, attention_mask=surf_mask).last_hidden_state
         last = surf_mask.flip(1).argmax(1)
         v = hidden[torch.arange(n, device=hidden.device), last]
-        pooled = self._pool(v.view(-1, k, hidden.shape[-1]))
+        pooled = self._cluster_pool(v, k_per_cluster)
         return self.mu_head(pooled), self.logvar_head(pooled)
 
     # ------------------------------------------------------------------ #
@@ -161,43 +191,56 @@ class OdinModel(nn.Module):
         self,
         surf_ids: torch.Tensor,
         surf_mask: torch.Tensor,
+        k_per_cluster: torch.Tensor,
         target_ids: torch.Tensor,
         target_mask: torch.Tensor,
         target_tags: torch.Tensor,
-        n_clusters: int,
+        target_primed: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Teacher-forced step.
 
         Args:
-            surf_ids / surf_mask: ``(B*K_in, L_in)`` encoder inputs (tag prepended).
-            target_ids / target_mask: ``(B*K_out, L)`` target token ids (no tag).
-            target_tags: ``(B*K_out,)`` tag token id priming each target.
-            n_clusters: ``B`` (surfaces/targets are laid out cluster-major).
+            surf_ids / surf_mask: ``(N, L_in)`` encoder inputs (tag prepended),
+                rows laid out cluster-major.
+            k_per_cluster: ``(B,)`` surfaces per cluster.
+            target_ids / target_mask: ``(NK, L)`` target token ids (no tag).
+            target_tags: ``(NK,)`` tag token id of each target's true script.
+            target_primed: ``(NK,)`` 0/1 — primed rows are seeded with the tag
+                (decoder input ``[BOS, tag, t0, ...]``, labels ``[tag, t0, ...]``);
+                unprimed rows decode from the latent alone (``[BOS, t0, ...]``,
+                labels ``[t0, ...]``), the unknown-alphabet regime.
 
         Returns a dict with ``loss`` (CE + ``kl_weight`` * KL), ``ce`` and ``kl``.
         """
-        b = int(n_clusters)
-        k_in = surf_ids.shape[0] // b
-        hidden = self.encoder(input_ids=surf_ids, attention_mask=surf_mask).last_hidden_state
-        last = surf_mask.flip(1).argmax(1)
-        v = hidden[torch.arange(surf_ids.shape[0], device=hidden.device), last].view(b, k_in, -1)
-        pooled = self._pool(v)
-        mu = self.mu_head(pooled)
-        logvar = self.logvar_head(pooled)
+        b = k_per_cluster.shape[0]
+        mu, logvar = self.encode(surf_ids, surf_mask, k_per_cluster=k_per_cluster)
         std = torch.exp(0.5 * logvar)
         z = mu + std * torch.randn_like(std)
 
         k_out = target_ids.shape[0] // b
-        z_rep = z.repeat_interleave(k_out, dim=0)  # (B*K_out, d)
+        z_rep = z.repeat_interleave(k_out, dim=0)  # (NK, d)
         device = target_ids.device
 
         nk = target_ids.shape[0]
+        primed = target_primed.bool().to(device)
         tags_col = target_tags.unsqueeze(1)
-        labels = torch.cat([tags_col, target_ids], dim=1)  # (NK, L+1)
-        labels_mask = torch.cat([torch.ones(nk, 1, dtype=torch.long, device=device), target_mask], dim=1)
-        labels = labels.masked_fill(labels_mask == 0, -100)
-        bos_col = torch.full((target_ids.shape[0], 1), self.bos_token_id, dtype=torch.long, device=device)
-        decoder_input = torch.cat([bos_col, tags_col, target_ids[:, :-1]], dim=1)  # (NK, L+1)
+        body = target_ids[:, :-1]
+        bos_col = torch.full((nk, 1), self.bos_token_id, dtype=torch.long, device=device)
+        pad_col = torch.zeros(nk, 1, dtype=torch.long, device=device)
+        # Primed:   [BOS, tag, t0, t1, ...]      Unprimed: [BOS, t0, t1, ..., pad]
+        dec_primed = torch.cat([bos_col, tags_col, body], dim=1)
+        dec_unprimed = torch.cat([bos_col, body, pad_col], dim=1)
+        decoder_input = torch.where(primed.unsqueeze(1), dec_primed, dec_unprimed)
+        # Primed:   labels [tag, t0, t1, ...]    Unprimed: labels [t0, t1, ...]
+        lab_primed = torch.cat([tags_col, target_ids], dim=1)
+        lab_unprimed = torch.cat([pad_col, target_ids], dim=1)
+        labels = torch.where(primed.unsqueeze(1), lab_primed, lab_unprimed)
+        real_len = target_mask.sum(1)  # (NK,) real target tokens per row
+        label_len = torch.where(primed, real_len + 1, real_len)
+        label_mask = torch.arange(labels.shape[1], device=device) < label_len.unsqueeze(1)
+        labels = labels.masked_fill(label_mask == 0, -100)
+        dec_len = label_len + 1  # + BOS
+        dec_mask = torch.arange(decoder_input.shape[1], device=device) < dec_len.unsqueeze(1)
 
         if self.decoder_family == "modernbert":
             assert self.z_proj is not None
@@ -213,14 +256,10 @@ class OdinModel(nn.Module):
         else:
             memory = z_rep.unsqueeze(1)
             memory_mask = torch.ones(memory.shape[0], 1, dtype=torch.long, device=device)
-            input_mask = torch.cat(
-                [torch.ones(decoder_input.shape[0], 2, dtype=torch.long, device=device), target_mask[:, :-1]],
-                dim=1,
-            )
             logits = self.lm_head(
                 self.decoder(
                     input_ids=decoder_input,
-                    attention_mask=input_mask,
+                    attention_mask=dec_mask,
                     encoder_hidden_states=memory,
                     encoder_attention_mask=memory_mask,
                 ).last_hidden_state
@@ -254,18 +293,20 @@ class OdinModel(nn.Module):
     def generate(
         self,
         z: torch.Tensor,
-        tag_id: int,
+        tag_id: int | None,
         *,
         max_new_tokens: int = 32,
         temperature: float = 0.0,
         top_p: float | None = None,
         generator: torch.Generator | None = None,
     ) -> list[int]:
-        """Greedy/sample decoding of one surface primed by ``tag_id``.
+        """Greedy/sample decoding of one surface.
 
         Args:
             z: Latent vector of shape ``(d,)`` or ``(1, d)`` (use ``mu``).
-            tag_id: Token id of the priming script tag (e.g. ``[gk]``).
+            tag_id: Token id of the priming script tag (e.g. ``[gk]``), or
+                ``None`` to decode without alphabet information (the
+                unknown-alphabet regime).
             max_new_tokens: Hard cap on generated tokens (excluding BOS/tag).
             temperature: 0 for greedy; >0 for sampling.
             top_p: Optional nucleus filter when sampling.
@@ -280,13 +321,15 @@ class OdinModel(nn.Module):
             with torch.no_grad():
                 z = z.view(1, -1).to(next(self.parameters()).device)
                 generated: list[int] = []
+                prefix_ids = [self.bos_token_id, int(tag_id)] if tag_id is not None else [self.bos_token_id]
                 if self.decoder_family == "modernbert":
                     assert self.z_proj is not None
                     embed = self._decoder_embed_module()
-                    prefix = embed(torch.tensor([[self.bos_token_id, int(tag_id)]], device=z.device))
+                    prefix = embed(torch.tensor([prefix_ids], device=z.device))
                     embeddings = torch.cat([self.z_proj(z).unsqueeze(1), prefix], dim=1)
                     position_ids = torch.arange(embeddings.shape[1], device=z.device).unsqueeze(0)
                     out = self.decoder(inputs_embeds=embeddings, position_ids=position_ids, use_cache=True)
+                    base_pos = embeddings.shape[1]  # position of the first generated token
                     for _ in range(max_new_tokens):
                         token = int(
                             self._sample(self.lm_head(out.last_hidden_state)[:, -1], temperature, top_p, generator)
@@ -295,7 +338,7 @@ class OdinModel(nn.Module):
                             break
                         generated.append(token)
                         step_ids = torch.tensor([[token]], device=z.device)
-                        step_pos = torch.tensor([3 + len(generated) - 1], device=z.device).unsqueeze(0)
+                        step_pos = torch.tensor([base_pos + len(generated) - 1], device=z.device).unsqueeze(0)
                         out = self.decoder(
                             inputs_embeds=embed(step_ids),
                             position_ids=step_pos,
@@ -305,7 +348,7 @@ class OdinModel(nn.Module):
                 else:
                     memory = z.unsqueeze(1)
                     memory_mask = torch.ones(1, 1, dtype=torch.long, device=z.device)
-                    seed = torch.tensor([[self.bos_token_id, int(tag_id)]], device=z.device)
+                    seed = torch.tensor([prefix_ids], device=z.device)
                     out = self.decoder(
                         input_ids=seed,
                         encoder_hidden_states=memory,

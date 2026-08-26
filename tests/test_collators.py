@@ -79,15 +79,46 @@ def make_collator(rate: float = 0.0, **kwargs) -> OdinVAECollator:
 def test_batch_shapes() -> None:
     collator = make_collator(k_input=4, k_latin_target=4, k_non_latin_target=2)
     batch = collator([rich_cluster("c0"), rich_cluster("c1"), rich_cluster("c2")])
-    assert batch["n_clusters"] == 3
-    assert batch["surf_ids"].shape[0] == 3 * 4
+    assert batch["k_per_cluster"].shape == (3,)
+    # k is drawn per cluster from 1..k_input; rows are laid out cluster-major.
+    assert batch["k_per_cluster"].min() >= 1
+    assert batch["k_per_cluster"].max() <= 4
+    assert batch["surf_ids"].shape[0] == int(batch["k_per_cluster"].sum())
     assert batch["surf_mask"].shape == batch["surf_ids"].shape
     assert batch["target_ids"].shape[0] == 3 * 6
     assert batch["target_mask"].shape == batch["target_ids"].shape
     assert batch["target_tags"].shape == (18,)
+    assert batch["target_primed"].shape == (18,)
+    assert set(batch["target_primed"].tolist()) <= {0, 1}
     # The tag token is prepended to every input row (tag ids start at 1000).
     assert (batch["surf_ids"][:, 0] >= 1000).all()
     assert (batch["surf_mask"][:, 0] == 1).all()
+
+
+def test_input_count_drawn_uniformly() -> None:
+    collator = make_collator(k_input=4)
+    ks = []
+    for i in range(200):
+        batch = collator([rich_cluster(f"c{i}")])
+        ks.append(int(batch["k_per_cluster"][0]))
+    assert set(ks) == {1, 2, 3, 4}
+    # Uniform over 4 values: 200 draws, each value expected ~50.
+    from collections import Counter
+
+    counts = Counter(ks)
+    assert all(25 <= c <= 75 for c in counts.values())
+
+
+def test_target_priming_is_coin_flip() -> None:
+    collator = make_collator(k_input=4, k_latin_target=4, k_non_latin_target=2)
+    primed = []
+    for i in range(30):
+        batch = collator([rich_cluster(f"c{i}")])
+        primed.extend(batch["target_primed"].tolist())
+    frac = sum(primed) / len(primed)
+    assert len(primed) == 30 * 6
+    # Bernoulli(0.5) over 180 draws: comfortably inside 0.35..0.65.
+    assert 0.35 < frac < 0.65
 
 
 def test_stratified_targets() -> None:
@@ -107,7 +138,8 @@ def test_inputs_targets_disjoint_when_possible() -> None:
     tok = collator.tokenizer
     surf_texts = {tok.decode(row.tolist()[1:]) for row in batch["surf_ids"]}
     tgt_texts = {tok.decode(row.tolist()) for row in batch["target_ids"]}
-    assert len(surf_texts) == 4
+    k = int(batch["k_per_cluster"][0])
+    assert len(surf_texts) == k
     assert len(tgt_texts) == 6
     assert surf_texts.isdisjoint(tgt_texts)
 
@@ -170,7 +202,7 @@ def test_deterministic_within_same_batch_position() -> None:
     batch1 = collator([cluster])
     collator._batch_idx = 0  # reset the position counter for reproducibility
     batch2 = collator([cluster])
-    for key in ("surf_ids", "surf_mask", "target_ids", "target_mask", "target_tags"):
+    for key in ("surf_ids", "surf_mask", "k_per_cluster", "target_ids", "target_mask", "target_tags", "target_primed"):
         assert torch.equal(batch1[key], batch2[key])
 
 
@@ -198,10 +230,12 @@ def test_small_cluster_fallback_to_overlap() -> None:
     collator = make_collator(k_input=2, k_latin_target=2, k_non_latin_target=0)
     cluster = make_cluster("c0", [("la", "a"), ("la", "b")])
     batch = collator([cluster])
-    assert batch["surf_ids"].shape[0] == 2
+    k = int(batch["k_per_cluster"][0])
+    assert k in (1, 2)
+    assert batch["surf_ids"].shape[0] == k
     assert batch["target_ids"].shape[0] == 2  # exactly k targets, even with overlap
     tok = collator.tokenizer
-    assert {tok.decode(r.tolist()[1:]) for r in batch["surf_ids"]} == {"a", "b"}
+    assert {tok.decode(r.tolist()[1:]) for r in batch["surf_ids"]} <= {"a", "b"}
     assert all(tok.decode(r.tolist()) in {"a", "b"} for r in batch["target_ids"])
 
 

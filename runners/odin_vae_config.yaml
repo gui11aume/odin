@@ -31,6 +31,8 @@ splits:
 augmentation:
   rate: 0.015
   confusion_weight: 0.7
+  # k is drawn uniformly from 1..k_input per cluster (real patent families
+  # have one surface per member); targets are tag-primed 50% of the time.
   k_input: 4
   k_latin_target: 4
   k_non_latin_target: 2

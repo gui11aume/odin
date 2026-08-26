@@ -30,23 +30,44 @@ def make_model(decoder: str = "modernbert", device: str = "cpu") -> OdinModel:
     return model.to(device)
 
 
-def make_batch(b: int = 4, k_in: int = 3, k_out: int = 2, l_in: int = 6, l_out: int = 4, device: str = "cpu") -> dict:
+def make_batch(
+    b: int = 4,
+    k_in: int = 3,
+    k_out: int = 2,
+    l_in: int = 6,
+    l_out: int = 4,
+    primed: bool = True,
+    k_per_cluster: list[int] | None = None,
+    target_primed: list[int] | None = None,
+    device: str = "cpu",
+) -> dict:
+    """A model batch. ``primed=True`` keeps the classic all-primed targets."""
     torch.manual_seed(0)
-    surf_ids = torch.randint(3, VOCAB, (b * k_in, l_in), device=device)
-    surf_mask = torch.ones(b * k_in, l_in, dtype=torch.long, device=device)
-    surf_mask[0, -2:] = 0
-    surf_mask[1, -1:] = 0
-    target_ids = torch.randint(3, VOCAB, (b * k_out, l_out), device=device)
-    target_mask = torch.ones(b * k_out, l_out, dtype=torch.long, device=device)
+    if k_per_cluster is None:
+        k_per_cluster = [k_in] * b
+    n_in = sum(k_per_cluster)
+    surf_ids = torch.randint(3, VOCAB, (n_in, l_in), device=device)
+    surf_mask = torch.ones(n_in, l_in, dtype=torch.long, device=device)
+    if n_in >= 2:
+        surf_mask[0, -2:] = 0
+        surf_mask[1, -1:] = 0
+    else:
+        surf_mask[0, -1:] = 0
+    nk = b * k_out
+    target_ids = torch.randint(3, VOCAB, (nk, l_out), device=device)
+    target_mask = torch.ones(nk, l_out, dtype=torch.long, device=device)
     target_mask[0, -1:] = 0
-    target_tags = torch.tensor(TAGS[: b * k_out], device=device)
+    target_tags = torch.tensor(TAGS[:nk], device=device)
+    if target_primed is None:
+        target_primed = [1 if primed else 0] * nk
     return {
         "surf_ids": surf_ids,
         "surf_mask": surf_mask,
+        "k_per_cluster": torch.tensor(k_per_cluster, dtype=torch.long, device=device),
         "target_ids": target_ids,
         "target_mask": target_mask,
         "target_tags": target_tags,
-        "n_clusters": b,
+        "target_primed": torch.tensor(target_primed, dtype=torch.long, device=device),
     }
 
 
@@ -144,6 +165,58 @@ def test_encode_k_validation() -> None:
         assert mu.shape == (2, model.config.hidden_size)
     with pytest.raises(ValueError, match="multiple"):
         model.encode(ids, mask, k=3)
+
+
+def test_forward_mixed_priming_and_variable_k() -> None:
+    for decoder in ("modernbert", "t5"):
+        model = make_model(decoder)
+        # Cluster sizes 1..4 (variable-k encoder path) and a mix of
+        # primed/unprimed targets in the same batch.
+        k = [1, 2, 3, 4]
+        nk = 4 * 2
+        batch = make_batch(b=4, k_per_cluster=k, k_out=2, target_primed=[i % 2 for i in range(nk)])
+        out = model(**batch)
+        assert torch.isfinite(out["loss"])
+        out["loss"].backward()
+        assert model.pool_query.grad is not None
+
+
+def test_priming_changes_decoder_input() -> None:
+    """Primed rows reach the decoder as [BOS, tag, ...]; unprimed as [BOS, ...]."""
+    model = make_model("modernbert").eval()
+    batch = make_batch(b=1, k_in=1, k_out=2, target_primed=[1, 0])
+    embed = model._decoder_embed_module()
+    captured: list[torch.Tensor] = []
+
+    class Spy(torch.nn.Module):
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            captured.append(x)
+            return embed(x)
+
+    model.decoder.embeddings.tok_embeddings = Spy()
+    with torch.no_grad():
+        model(**batch)
+    dec = captured[0]
+    tag = batch["target_tags"][0]
+    assert dec[0, 0] == BOS and dec[0, 1] == tag  # primed row: tag at position 1
+    assert (dec[0, 2:] == batch["target_ids"][0, :-1]).all()  # then t0..t_{L-2}
+    assert dec[1, 0] == BOS and dec[1, 1] == batch["target_ids"][1, 0]  # unprimed: no tag
+    assert (dec[1, 1:-1] == batch["target_ids"][1, :-1]).all()
+    assert dec[1, -1] == PAD
+
+
+def test_generate_unprimed() -> None:
+    for decoder in ("modernbert", "t5"):
+        model = make_model(decoder).eval()
+        z = torch.zeros(model.config.hidden_size)
+        ids = model.generate(z, None, max_new_tokens=5)
+        assert len(ids) <= 5
+        assert all(PAD <= t < VOCAB for t in ids)
+        # Greedy decoding is deterministic, and differs from primed decoding
+        # (different seed sequence) with overwhelming probability.
+        assert ids == model.generate(z, None, max_new_tokens=5)
+        primed_ids = model.generate(z, TAGS[0], max_new_tokens=5)
+        assert ids != primed_ids
 
 
 def test_kl_weight_zero_drops_kl() -> None:
