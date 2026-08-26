@@ -1,9 +1,13 @@
 """Lightning DataModule over local webdataset shards (no intermediate store).
 
 Each shard sample already contains the full cluster record, so the stream
-goes directly to the collator. The shard-level resume contract is preserved:
-uniform ``n_instances_per_shard`` per split, checkpoints on shard boundaries,
-and the seed restored from the checkpoint.
+goes directly to the collator. Shard-level resume is checkpoint-resident:
+the train dataloader is stateful (see ``DataLoaderWithAutoCheckpoint``), so
+the ``(epoch, shard)`` offset is written into the Lightning checkpoint when
+it is saved and restored by Lightning on ``fit(ckpt_path=...)``. The
+contract requires a uniform ``n_instances_per_shard`` per split and
+checkpoints on shard boundaries; the seed is a config constant, validated
+against the checkpoint on resume.
 """
 
 from __future__ import annotations
@@ -139,16 +143,14 @@ class OdinVAEDataModule(pl.LightningDataModule):
     ) -> DataLoaderWithAutoCheckpoint:
         """Create a dataloader from a dataset and a dataloader config.
 
-        Train resumes in-shard via the processed-shard offset. Val/test are
-        finite (``is_endless=False``): applying the train shard offset would
-        skip past the short eval shard lists and yield no batches (especially
-        after a checkpoint resume when train progress is non-zero), so they
-        only sync the epoch for the shuffle and always start at shard 0.
+        The train split is checkpoint-resident: its progress is resolved
+        from the Trainer when a checkpoint is saved and restored by
+        Lightning on resume. Val/test are finite (``is_endless=False``) and
+        always start at shard 0 (their fixed ``seed`` shuffle is consumed in
+        full on every pass, so no progress tracking is needed).
         """
-        progress_fn = (
-            self._trainer_epoch_batch_progress if split == "train" else self._finite_split_progress_from_trainer
-        )
         _mp_context = torch.multiprocessing.get_context("fork") if dataloader_config.num_workers > 0 else None
+        is_train = split == "train"
         return DataLoaderWithAutoCheckpoint(
             dataset=dataset,
             batch_size=dataloader_config.batch_size,
@@ -159,20 +161,14 @@ class OdinVAEDataModule(pl.LightningDataModule):
             pin_memory=dataloader_config.pin_memory,
             multiprocessing_context=_mp_context,
             in_order=dataloader_config.in_order,
-            progress_fn=progress_fn,
+            progress_fn=(lambda: self._data_progress()) if is_train else None,
+            n_instances_per_shard=self.config.splits[split].dataset.n_instances_per_shard if is_train else None,
         )
 
-    def _trainer_epoch_batch_progress(self) -> tuple[int, int]:
-        """Read processed epoch and in-epoch processed batches from the Trainer.
-
-        When a checkpoint is saved on the last train batch, Lightning can
-        serialize a boundary state where ``batch_progress.is_last_batch`` is
-        true while ``epoch_progress.processed`` still points to the previous
-        epoch. We normalize this boundary to the next-epoch start so resume
-        begins at shard 0 of the following epoch.
-        """
+    def _data_progress(self) -> tuple[int, int] | None:
+        """Current ``(processed_epochs, processed_samples)``, or None outside a fit."""
         if self.trainer is None:
-            return (0, 0)
+            return None
         epoch_progress = self.trainer.fit_loop.epoch_progress.current
         batch_progress = self.trainer.fit_loop.epoch_loop.batch_progress
 
@@ -180,19 +176,17 @@ class OdinVAEDataModule(pl.LightningDataModule):
         processed_epochs = int(getattr(epoch_progress, "processed", 0))
         processed_batches = int(getattr(batch_progress.current, "processed", 0))
 
+        # When a checkpoint is saved on the last train batch, Lightning can
+        # serialize a boundary state where ``batch_progress.is_last_batch``
+        # is true while ``epoch_progress.processed`` still points to the
+        # previous epoch. Normalize this boundary to the next-epoch start so
+        # resume begins at shard 0 of the following epoch.
         if bool(batch_progress.is_last_batch):
             processed_epochs = max(processed_epochs, int(getattr(epoch_progress, "ready", 0)))
             processed_batches = 0
 
-        n_instances_per_shard = self.config.splits["train"].dataset.n_instances_per_shard
         batch_size = self.config.splits["train"].dataloader.batch_size
-        processed_shards = int(batch_size * processed_batches / n_instances_per_shard)
-        return (processed_epochs, processed_shards)
-
-    def _finite_split_progress_from_trainer(self) -> tuple[int, int]:
-        """Epoch for the shard shuffle; shard offset 0 for val/test streams."""
-        processed_epochs, _ = self._trainer_epoch_batch_progress()
-        return (processed_epochs, 0)
+        return (processed_epochs, processed_batches * batch_size)
 
     def train_dataloader(self) -> DataLoaderWithAutoCheckpoint | None:
         """Return the training dataloader."""
@@ -205,23 +199,3 @@ class OdinVAEDataModule(pl.LightningDataModule):
     def test_dataloader(self) -> DataLoaderWithAutoCheckpoint | None:
         """Return the test dataloader."""
         return self._ensure_loader("test") if "test" in self.config.splits else None
-
-    def load_checkpoint(self, checkpoint: dict) -> None:
-        """Load a checkpoint (validates the shard boundary and recovers the seed).
-
-        The information about the epoch and the number of processed batches
-        is restored in the trainer and is directly sent to the dataset.
-        """
-        fit_loop = checkpoint["loops"]["fit_loop"]
-        # Check that the checkpoint is on a shard boundary.
-        epoch_progress = fit_loop["epoch_loop.batch_progress"]
-        if not bool(epoch_progress["is_last_batch"]):
-            processed_batches = epoch_progress["current"]["processed"]
-            batch_size = self.config.splits["train"].dataloader.batch_size
-            n_instances_per_shard = self.config.splits["train"].dataset.n_instances_per_shard
-            if processed_batches * batch_size % n_instances_per_shard != 0:
-                raise ValueError("Checkpoint is not on a shard boundary.")
-        # Load the random seed.
-        fit_loop_dict = fit_loop["state_dict"]
-        train_dataloader_state = fit_loop_dict["combined_loader"][0]
-        self.seed = train_dataloader_state["seed"]

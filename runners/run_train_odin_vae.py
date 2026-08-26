@@ -140,23 +140,41 @@ if __name__ == "__main__":
     ckpt_path = Path(training_cfg.checkpoint_path) if training_cfg.checkpoint_path else None
     if training_cfg.checkpoint_path and (ckpt_path is None or not ckpt_path.is_file()):
         raise FileNotFoundError(f"checkpoint_path not found: {training_cfg.checkpoint_path}")
-    if ckpt_path is not None:
-        # Lightning checkpoints we wrote ourselves; weights_only can't decode their full state.
-        datamodule.load_checkpoint(torch.load(str(ckpt_path), map_location="cpu", weights_only=False))  # nosec: B614
 
     csv_logger = CSVLogger("lightning_logs", name="odin_vae")
     callbacks: list[pl.Callback] = [RichProgressBar(theme=RichProgressBarTheme(metrics_format=".6g"))]
     if training_cfg.enable_checkpointing:
+        checkpoint_kwargs = dict(dirpath=str(csv_logger.log_dir), auto_insert_metric_name=False, save_top_k=-1)
+        # Epoch-end checkpoint (saved on the last train batch of each epoch).
         callbacks.append(
             ModelCheckpoint(
-                dirpath=str(csv_logger.log_dir),
                 filename="{epoch:03d}",
-                auto_insert_metric_name=False,
-                save_top_k=-1,
                 every_n_epochs=1,
                 save_on_train_epoch_end=False,
+                **checkpoint_kwargs,
             )
         )
+        # Optional mid-epoch checkpoints; must land on shard boundaries so the
+        # checkpoint is resumable.
+        if training_cfg.checkpoint_every_n_steps > 0:
+            n_instances = root_cfg.splits["train"].dataset.n_instances_per_shard
+            batch_size = root_cfg.splits["train"].dataloader.batch_size
+            if n_instances % batch_size != 0:
+                raise ValueError("n_instances_per_shard must be a multiple of batch_size for checkpointing.")
+            batches_per_shard = n_instances // batch_size
+            if training_cfg.checkpoint_every_n_steps % batches_per_shard != 0:
+                raise ValueError(
+                    f"checkpoint_every_n_steps ({training_cfg.checkpoint_every_n_steps}) must be a multiple of the "
+                    f"batches per shard ({batches_per_shard} = n_instances_per_shard / batch_size) so checkpoints "
+                    "land on shard boundaries."
+                )
+            callbacks.append(
+                ModelCheckpoint(
+                    filename="{epoch:03d}-step{step:06d}",
+                    every_n_train_steps=training_cfg.checkpoint_every_n_steps,
+                    **checkpoint_kwargs,
+                )
+            )
     trainer = Trainer(
         lr=training_cfg.lr,
         lr_warmup_ratio=training_cfg.lr_warmup_ratio,
@@ -172,6 +190,7 @@ if __name__ == "__main__":
         limit_train_batches=limit_train_batches,
         limit_val_batches=training_cfg.limit_val_batches,
         max_epochs=training_cfg.max_epochs,
+        max_steps=training_cfg.max_steps,
         enable_checkpointing=training_cfg.enable_checkpointing,
         log_every_n_steps=training_cfg.log_every_n_steps,
         logger=csv_logger,

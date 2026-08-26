@@ -13,9 +13,9 @@ from .augment import SCRIPTS
 class ConfigForDataLoader(pydantic.BaseModel):
     """Configuration for the PyTorch ``DataLoader``.
 
-    ``persistent_workers`` must stay ``False``: the resume machinery relies
-    on workers being rebuilt at every epoch so that the dataset iterator
-    re-reads the shared progress values (see ``data/grandwds.py``).
+    ``persistent_workers`` must stay ``False``: the resume offset is read
+    from the dataset's copy-on-write snapshot at fork time, so workers must
+    be rebuilt for the progress to take effect (see ``data/grandwds.py``).
     """
 
     model_config = pydantic.ConfigDict(extra="forbid")
@@ -30,7 +30,7 @@ class ConfigForDataLoader(pydantic.BaseModel):
     @pydantic.model_validator(mode="after")
     def _check_persistent(self) -> "ConfigForDataLoader":
         if self.persistent_workers:
-            raise ValueError("persistent_workers must be False (required for shard-level resume).")
+            raise ValueError("persistent_workers must be False (required for shard-level resume; see grandwds.py).")
         return self
 
 
@@ -125,7 +125,14 @@ class ConfigForHarness(pydantic.BaseModel):
     limit_val_batches: float = pydantic.Field(default=1.0, ge=0.0)
     gradient_clip_val: float | None = pydantic.Field(default=1.0)
     max_epochs: int = pydantic.Field(default=3, ge=1)
+    # Absolute global-step cap (in addition to max_epochs); None disables.
+    max_steps: int | None = pydantic.Field(default=None, ge=1)
     enable_checkpointing: bool = pydantic.Field(default=True)
+    # Checkpoint every N train steps (in addition to the epoch-end
+    # checkpoint). Must be a multiple of n_instances_per_shard / batch_size
+    # so the checkpoint lands on a shard boundary (resumable). 0 disables
+    # step-based checkpoints (epoch-end only, one file per epoch).
+    checkpoint_every_n_steps: int = pydantic.Field(default=0, ge=0)
     # Epoch length in train batches; <= 0 means "auto" (one full pass over the
     # train shards, computed by the entry point from the build manifest).
     limit_train_batches: float = pydantic.Field(default=-1.0)

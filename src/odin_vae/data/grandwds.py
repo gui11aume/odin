@@ -1,62 +1,38 @@
 """Grand WebDataset: resumable, DDP-safe webdataset stream over local shards.
 
 This module provides resumable iterators over local webdataset shards that
-can be restarted from a checkpoint without losing determinism. (Design
-ported from the ranktriever-arena data pipeline; the "Ensemble" prefix was
-dropped and the shards are local files rather than S3 objects.)
+can be restarted from a checkpoint without losing determinism.
 
-Background
-~~~~~~~~~~
+Design
+~~~~~~
 
-A DataLoader is a dataset and a collator. When the DataLoader is requested
-to send data, an iterator is created with ``DataLoader.__iter__()``, which
-calls ``dataset.__iter__()`` to create an iterator over the dataset in
-order to pass items to the collator via ``next()``. The dataset iterator is
-thus what determines the schedule of the data that reaches the collator.
+The shard order of an epoch is a full permutation without replacement of the
+shard list, seeded by ``seed + epoch``. Every rank and worker computes the
+identical permutation and then ``split_by_node``/``split_by_worker`` take
+their strided subsequences, so DDP shards are disjoint by construction.
+Endless streams (train) cycle the permutation forever and are stopped
+externally (``limit_train_batches``); finite streams (val/test) stop after
+one pass.
 
-It is important to control this iterator so that:
-
-- items are dispatched according to the desired schedule,
-- the flow of data can scale with available resources,
-- the flow of data can be restarted if it is interrupted.
-
-In the forking model for multiprocessing (used here), workers receive a
-copy-on-write snapshot of the dataset object at fork time: plain Python
-attributes are not shared between the main process and the workers, and
-``DataLoader.__iter__()`` is called after forking. Therefore the epoch and
-the number of processed shards are stored as ``multiprocessing.Value``
-integers backed by a shared-memory segment that every process can access.
-The main process is the sole writer: ``DataLoaderWithAutoCheckpoint`` has a
-``progress_fn`` callable (provided by the data module, backed by the
-Lightning Trainer) that it invokes in the main process at the beginning of
-every ``__iter__()``, and it then calls ``_set_shared_progress_from_main()``
-on the dataset. Workers read the shared values in ``GrandShardList.__iter__``.
-
-Because ``GrandShardList.__iter__()`` is only (re)called when a worker is
-created, the workers must be instantiated with ``persistent_workers=False``
-so that the dataset iterator is refreshed at the start of every epoch (or,
-alternatively, the number of shards must be a multiple of the number of
-workers).
-
-Shard order per epoch is a full permutation without replacement, seeded by
-``seed + epoch``; every rank computes the identical permutation before
-``split_by_node``/``split_by_worker`` take their strided subsequences, so
-DDP shards are disjoint by construction. This design ensures that:
-
-- the order of the shards is deterministic,
-- resuming from a checkpoint is reproducible.
+Resume state is a pair of integers: ``(processed_epochs, processed_shards)``.
+Iteration starts at shard offset ``processed_shards`` of permutation
+``seed + processed_epochs``. The main process is the sole writer: it sets the
+progress on the dataset before the DataLoader workers are forked, and the
+workers read it from the copy-on-write snapshot of the dataset they inherit
+at fork. This is why the pipeline requires ``multiprocessing_context="fork"``
+and ``persistent_workers=False`` (a persistent worker would keep iterating
+its original snapshot).
 """
 
 from __future__ import annotations
 
-import multiprocessing as mp
 import random
 
 import webdataset as wds
 
 
 class GrandShardList(wds.shardlists.SimpleShardList):
-    """Shard list with shared-memory training progress for resumable iteration."""
+    """Shard list with training progress for resumable iteration."""
 
     def __init__(
         self,
@@ -75,20 +51,18 @@ class GrandShardList(wds.shardlists.SimpleShardList):
         """
         super().__init__(urls, seed=seed)
         self.is_endless = is_endless
-        self._processed_epochs = mp.Value("q", 0)
-        self._processed_shards = mp.Value("q", 0)
+        self.processed_epochs = 0
+        self.processed_shards = 0
 
-    def _set_shared_progress_from_main(self, processed_epochs: int, processed_shards: int) -> None:
-        """Write progress values in shared memory from the main process."""
-        with self._processed_epochs.get_lock():
-            self._processed_epochs.value = int(processed_epochs)
-        with self._processed_shards.get_lock():
-            self._processed_shards.value = int(processed_shards)
+    def set_progress(self, processed_epochs: int, processed_shards: int) -> None:
+        """Set the resume progress (call from the main process before forking)."""
+        self.processed_epochs = int(processed_epochs)
+        self.processed_shards = int(processed_shards)
 
     def __iter__(self):
-        """Iterate over the shards, honoring the shared progress values.
+        """Iterate over the shards, honoring the progress.
 
-        The first pass starts at shard offset ``shards_processed`` (resume);
+        The first pass starts at shard offset ``processed_shards`` (resume);
         for an endless list the epoch permutation then repeats forever and
         must be stopped externally (e.g. ``limit_train_batches``).
 
@@ -96,10 +70,7 @@ class GrandShardList(wds.shardlists.SimpleShardList):
             dict: A dictionary containing the URL of each shard.
         """
         urls: list[str] = self.urls.copy()
-        with self._processed_epochs.get_lock():
-            epoch = int(self._processed_epochs.value)
-        with self._processed_shards.get_lock():
-            shards_processed = int(self._processed_shards.value)
+        epoch, shards_processed = self.processed_epochs, self.processed_shards
         # Shuffle the shards if a seed is provided.
         if self.seed is not None:
             random.Random(self.seed + epoch).shuffle(urls)  # nosec: B311  # deterministic shard shuffle
@@ -161,10 +132,15 @@ class GrandWebDataset(wds.WebDataset):
         self.append(self.grouper())
         self.append(wds.compat.check_empty)
 
-    def _set_shared_progress_from_main(self, processed_epochs: int, processed_shards: int) -> None:
-        """Write worker-visible progress values from the main process."""
-        self.shardlist._set_shared_progress_from_main(processed_epochs, processed_shards)
+    @property
+    def seed(self) -> int | None:
+        """Seed of the shard permutation (restored/validated on resume)."""
+        return self.shardlist.seed
 
-    def state_dict(self) -> dict:
-        """Return state to be saved in a checkpoint (the seed)."""
-        return {"seed": self.shardlist.seed}
+    def set_progress(self, processed_epochs: int, processed_shards: int) -> None:
+        """Set the resume progress on the shard list (main process only)."""
+        self.shardlist.set_progress(processed_epochs, processed_shards)
+
+    def progress(self) -> tuple[int, int]:
+        """Current resume progress ``(processed_epochs, processed_shards)``."""
+        return self.shardlist.processed_epochs, self.shardlist.processed_shards

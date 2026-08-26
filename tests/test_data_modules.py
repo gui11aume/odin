@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+import lightning.pytorch as pl
 import pytest
 import torch
 
@@ -14,7 +15,7 @@ from odin_vae.augment import LetterAugmenter
 from odin_vae.config_classes import ConfigForModel
 from odin_vae.data.collators import OdinVAECollator
 from odin_vae.data.data_modules import OdinVAEDataModule
-from odin_vae.data.grandwds import GrandWebDataset
+from odin_vae.data.grandwds import GrandShardList, GrandWebDataset
 from odin_vae.model import OdinModel
 
 _builder = get_builder()
@@ -127,13 +128,219 @@ def test_resume_skips_processed_shards(shard_root: Path) -> None:
     epoch0 = urls[:]
     random.Random(123 + 0).shuffle(epoch0)
     dataset = GrandWebDataset(pattern, seed=123, is_endless=False)
-    dataset._set_shared_progress_from_main(0, 2)  # skip the first two shards
+    dataset.set_progress(0, 2)  # skip the first two shards
     urls_seen: list[str] = []
     for item in dataset:
         url = item["__url__"]
         if not urls_seen or urls_seen[-1] != url:
             urls_seen.append(url)
     assert urls_seen == epoch0[2:]
+
+
+def test_dataset_progress_round_trip(shard_root: Path) -> None:
+    import itertools
+    import random
+
+    import webdataset as wds
+
+    manifest = json.loads((shard_root / "manifest.json").read_text())
+    pattern = f"{shard_root}/{manifest['train_pattern']}"
+
+    def shard_stream(dataset: GrandWebDataset) -> list[str]:
+        seen: list[str] = []
+        for item in dataset:
+            url = item["__url__"]
+            if not seen or seen[-1] != url:
+                seen.append(url)
+        return seen
+
+    src = GrandWebDataset(pattern, seed=123, is_endless=False)
+    src.set_progress(1, 3)
+    dst = GrandWebDataset(pattern, seed=123, is_endless=False)
+    assert dst.seed == 123
+    dst.set_progress(*src.progress())
+    assert dst.progress() == (1, 3)
+    assert shard_stream(dst) == shard_stream(src)
+    # Endless streams resume at the offset of the epoch permutation.
+    perm = wds.shardlists.expand_urls(pattern)
+    random.Random(123).shuffle(perm)
+    src_e = GrandWebDataset(pattern, seed=123, is_endless=True)
+    src_e.set_progress(0, 1)
+    head = [d["url"] for d in itertools.islice(src_e.shardlist, 3)]
+    assert head == perm[1:4]
+
+
+def make_auto_loader(shard_root: Path, **loader_kwargs):
+    from odin_vae.data.data_loaders import DataLoaderWithAutoCheckpoint
+
+    manifest = json.loads((shard_root / "manifest.json").read_text())
+    pattern = f"{shard_root}/{manifest['train_pattern']}"
+    dataset = GrandWebDataset(pattern, seed=123, is_endless=False)
+    kwargs = dict(batch_size=8, num_workers=0, **loader_kwargs)
+    return DataLoaderWithAutoCheckpoint(dataset=dataset, **kwargs), dataset
+
+
+def test_loader_state_round_trip(shard_root: Path) -> None:
+    # Save-side: state_dict() resolves progress and stores samples (exact).
+    loader, dataset = make_auto_loader(shard_root, progress_fn=lambda: (0, 512), n_instances_per_shard=SHARD_SIZE)
+    state = loader.state_dict()
+    assert state == {"seed": 123, "processed_epochs": 0, "processed_samples": 512}
+    assert dataset.progress() == (0, 2)
+    # Load-side: the state drives a fresh dataset's offset.
+    loader2, dataset2 = make_auto_loader(shard_root, n_instances_per_shard=SHARD_SIZE)
+    loader2.load_state_dict(state)
+    assert dataset2.progress() == (0, 2)
+    # A progress-less (val-style) loader rejects progress-carrying state.
+    loader_val, _ = make_auto_loader(shard_root)
+    with pytest.raises(ValueError, match="n_instances_per_shard"):
+        loader_val.load_state_dict(state)
+    # No trainer attached: state_dict() preserves the last known progress.
+    assert loader2.state_dict() == state
+
+
+def test_loader_state_rejects_bad_boundaries(shard_root: Path) -> None:
+    import pytest
+
+    loader, _ = make_auto_loader(shard_root, n_instances_per_shard=SHARD_SIZE)
+    with pytest.raises(ValueError, match="non-shard-boundary"):
+        loader.load_state_dict({"seed": 123, "processed_epochs": 0, "processed_samples": SHARD_SIZE + 8})
+    with pytest.raises(ValueError, match="seed"):
+        loader.load_state_dict({"seed": 999, "processed_epochs": 0, "processed_samples": SHARD_SIZE})
+
+
+def test_loader_legacy_seed_only_bootstraps_once(shard_root: Path) -> None:
+    # Legacy checkpoints carry only the seed: the next __iter__ derives the
+    # progress from the Trainer exactly once, then the flag self-extinguishes.
+    loader, dataset = make_auto_loader(shard_root, progress_fn=lambda: (0, 512), n_instances_per_shard=SHARD_SIZE)
+    loader.load_state_dict({"seed": 123})
+    assert dataset.progress() == (0, 0)
+    iter(loader)
+    assert dataset.progress() == (0, 2)
+    # Second iteration: no re-bootstrap even if progress would differ.
+    loader._progress_fn = lambda: (1, 0)
+    iter(loader)
+    assert dataset.progress() == (0, 2)
+
+
+def test_data_progress_boundary_normalization(shard_root: Path) -> None:
+    class _NS:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    dm = make_datamodule(shard_root, make_collator(shard_root), batch_size=8)
+    dm.trainer = None
+    assert dm._data_progress() is None
+    batch_progress = _NS(current=_NS(processed=32), is_last_batch=False)
+    epoch_progress = _NS(current=_NS(processed=1, ready=2))
+    dm.trainer = _NS(fit_loop=_NS(epoch_progress=epoch_progress, epoch_loop=_NS(batch_progress=batch_progress)))
+    assert dm._data_progress() == (1, 32 * 8)
+    # Boundary: saved on the last batch -> normalize to the next epoch start.
+    batch_progress.is_last_batch = True
+    assert dm._data_progress() == (2, 0)
+
+
+class _CountingModule(pl.LightningModule):
+    """Lossless stand-in module for checkpoint round-trip tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.zeros(1))
+
+    def training_step(self, batch: dict, _: int) -> torch.Tensor:
+        return self.p.sum()
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        return torch.optim.SGD([self.p], lr=0.1)
+
+
+def test_checkpoint_resumes_data_offset(shard_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real Lightning save/restore round-trip drives the shard offset.
+
+    32 batches x batch_size 8 = 256 = exactly one shard, so checkpoints land
+    on shard boundaries. The resumed run must continue from the checkpoint's
+    shard offset of the same epoch permutation.
+    """
+    import random
+
+    import webdataset as wds
+    from lightning.pytorch.callbacks import ModelCheckpoint
+
+    manifest = json.loads((shard_root / "manifest.json").read_text())
+    pattern = f"{shard_root}/{manifest['train_pattern']}"
+    perm = wds.shardlists.expand_urls(pattern)
+    random.Random(123).shuffle(perm)
+
+    # Observe which shards the pipeline actually consumes (main process:
+    # num_workers=0).
+    consumed: list[list[str]] = []
+    current: list[str] = []
+    original = GrandShardList.__iter__
+
+    def probed(self):  # type: ignore[no-untyped-def]
+        for d in original(self):
+            if not current or current[-1] != d["url"]:
+                current.append(d["url"])
+            yield d
+
+    monkeypatch.setattr(GrandShardList, "__iter__", probed)
+
+    def make_trainer(ckpt_dir: Path, max_steps: int) -> pl.Trainer:
+        return pl.Trainer(
+            max_steps=max_steps,
+            accelerator="cpu",
+            devices=1,
+            logger=False,
+            enable_checkpointing=True,
+            callbacks=[
+                ModelCheckpoint(
+                    dirpath=str(ckpt_dir),
+                    every_n_train_steps=32,
+                    save_top_k=-1,
+                    filename="step{step:04d}",
+                    auto_insert_metric_name=False,
+                )
+            ],
+            limit_val_batches=0,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+        )
+
+    # Run 1: 64 steps = 2 shards -> checkpoints at step 32 (1 shard) and 64.
+    dm = make_datamodule(shard_root, make_collator(shard_root), batch_size=8)
+    make_trainer(shard_root / "ckpts", max_steps=64).fit(_CountingModule(), datamodule=dm)
+    consumed.append(current.copy())
+    # The fetcher prefetches one batch into the next shard; the fully
+    # consumed prefix must be the head of the epoch permutation.
+    assert consumed[0][:2] == perm[:2]
+
+    ckpt_path = shard_root / "ckpts" / "step0032.ckpt"
+    assert ckpt_path.is_file()
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)  # nosec: B614  # our own checkpoint
+    state = ckpt["loops"]["fit_loop"]["state_dict"]["combined_loader"][0]
+    assert state == {"seed": 123, "processed_epochs": 0, "processed_samples": SHARD_SIZE}
+
+    # Run 2: resume from the 1-shard checkpoint -> continue at perm[1].
+    current.clear()
+    dm2 = make_datamodule(shard_root, make_collator(shard_root), batch_size=8)
+    dm2.setup("fit")
+    dataset2 = dm2.datasets["train"]  # teardown clears the cache after fit
+    make_trainer(shard_root / "ckpts2", max_steps=64).fit(_CountingModule(), datamodule=dm2, ckpt_path=ckpt_path)
+    consumed.append(current.copy())
+    assert consumed[1][0] == perm[1]  # resumed at the checkpoint's shard offset
+    # The run consumed 32 more batches = 1 shard, starting from the offset.
+    assert dataset2.progress() == (0, 2)
+
+    # Run 3: legacy checkpoint (seed-only state) bootstraps from the restored
+    # Trainer counters and lands on the same offset.
+    legacy_path = shard_root / "ckpts" / "step0032.legacy.ckpt"
+    del state["processed_epochs"], state["processed_samples"]
+    ckpt["loops"]["fit_loop"]["state_dict"]["combined_loader"][0] = dict(state)
+    torch.save(ckpt, legacy_path)
+    current.clear()
+    dm3 = make_datamodule(shard_root, make_collator(shard_root), batch_size=8)
+    make_trainer(shard_root / "ckpts3", max_steps=64).fit(_CountingModule(), datamodule=dm3, ckpt_path=legacy_path)
+    consumed.append(current.copy())
+    assert consumed[2][0] == perm[1]  # legacy bootstrap landed on the same offset
 
 
 def test_val_split_finite(shard_root: Path) -> None:

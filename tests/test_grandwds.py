@@ -43,7 +43,7 @@ def test_shardlist_permutation_pinned() -> None:
 
 def test_shardlist_resume_offset() -> None:
     shardlist = GrandShardList(SHARDS, seed=123, is_endless=False)
-    shardlist._set_shared_progress_from_main(0, 2)
+    shardlist.set_progress(0, 2)
     assert [d["url"] for d in shardlist] == EPOCH0[2:]
 
 
@@ -63,7 +63,7 @@ def test_endless_cycles(tmp_path: Path) -> None:
 def test_resume_skips_processed_shards(tmp_path: Path) -> None:
     paths = build_shards(tmp_path)
     dataset = GrandWebDataset(paths, seed=123, is_endless=False)
-    dataset._set_shared_progress_from_main(0, 2)
+    dataset.set_progress(0, 2)
     assert keys_of(dataset) == ["x00", "x01"]
 
 
@@ -79,10 +79,18 @@ def test_ddp_split_disjoint(tmp_path: Path) -> None:
             assert keys_of(dataset) == expected
 
 
-def test_state_dict_holds_seed(tmp_path: Path) -> None:
+def test_seed_and_progress_api(tmp_path: Path) -> None:
     paths = build_shards(tmp_path)
     dataset = GrandWebDataset(paths, seed=123, is_endless=True)
-    assert dataset.state_dict() == {"seed": 123}
+    assert dataset.seed == 123
+    assert dataset.progress() == (0, 0)
+    dataset.set_progress(1, 2)
+    assert dataset.progress() == (1, 2)
+    # The offset applies to the resumed epoch's permutation: skipping two
+    # shards of epoch 1 (shard-2, shard-0) leaves shard-1.
+    shardlist = GrandShardList(paths, seed=123, is_endless=False)
+    shardlist.set_progress(1, 2)
+    assert [d["url"] for d in shardlist] == [paths[SHARDS.index(EPOCH1[2])]]
 
 
 def test_no_shards_raises(tmp_path: Path) -> None:
