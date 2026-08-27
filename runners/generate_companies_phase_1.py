@@ -115,8 +115,11 @@ def title_org_name(text: str) -> str:
     return " ".join(_org_token_case(tok) for tok in text.split() if tok)
 
 
-# Single-token trailing legal suffixes (punctuation-stripped, lowercased) ->
-# display spellings of the suffix. The suffix-less form is always offered too.
+# Trailing legal suffixes, keyed by suffix key (lowercase, diacritics and
+# punctuation stripped, glued: "S.à r.l." -> "sarl", "L.L.C." -> "llc",
+# "Co., Ltd." -> "coltd"). Values are the display spellings of the suffix; the
+# suffix-less form is always offered too, and the ALL-CAPS axis yields the
+# glued uppercase form ("EUROPE BRANDS SARL").
 _SUFFIX_FORMS: dict[str, tuple[str, ...]] = {
     "inc": ("Inc.", "Inc", "Incorporated"),
     "incorp": ("Incorp.", "Incorporated"),
@@ -146,38 +149,41 @@ _SUFFIX_FORMS: dict[str, tuple[str, ...]] = {
     "oy": ("Oy", "OY"),
     "zoo": ("zoo", "ZOO"),
     "aktiengesellschaft": ("Aktiengesellschaft", "AG", "A.G."),
-    "sarl": ("SARL", "S.A.R.L."),
-}
-
-# Two-token trailing legal suffixes -> combined display spellings.
-_TWO_TOKEN_SUFFIXES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("company", "ltd"): ("Company, Ltd.", "Co., Ltd.", "Co Ltd.", "Company Limited", "Ltd."),
-    ("co", "ltd"): ("Co., Ltd.", "Co Ltd.", "Co., Limited", "Company, Ltd.", "Ltd."),
-    ("company", "limited"): ("Company Limited", "Company, Limited", "Co., Ltd.", "Ltd."),
-    ("co", "limited"): ("Co., Ltd.", "Co Ltd.", "Co., Limited", "Ltd."),
-    ("corp", "ltd"): ("Corp., Ltd.", "Corporation, Ltd.", "Ltd."),
-    ("pte", "ltd"): ("Pte. Ltd.", "Pte Ltd.", "Pty. Ltd."),
-    ("kabushiki", "kaisha"): ("Kabushiki Kaisha", "K.K.", "KK"),
+    "sarl": ("SARL", "S.A.R.L.", "Société à responsabilité limitée"),
+    "companyltd": ("Company, Ltd.", "Co., Ltd.", "Co Ltd.", "Company Limited", "Ltd."),
+    "coltd": ("Co., Ltd.", "Co Ltd.", "Co., Limited", "Company, Ltd.", "Ltd."),
+    "companylimited": ("Company Limited", "Company, Limited", "Co., Ltd.", "Ltd."),
+    "colimited": ("Co., Ltd.", "Co Ltd.", "Co., Limited", "Ltd."),
+    "corpltd": ("Corp., Ltd.", "Corporation, Ltd.", "Ltd."),
+    "corporationltd": ("Corp., Ltd.", "Corporation, Ltd.", "Ltd."),
+    "pteltd": ("Pte. Ltd.", "Pte Ltd.", "Pty. Ltd."),
+    "kabushikikaisha": ("Kabushiki Kaisha", "K.K.", "KK"),
 }
 
 
-def _bare(tok: str) -> str:
-    return tok.strip(".,").lower()
+def _suffix_key(*tokens: str) -> str:
+    """Suffix key of trailing tokens: lowercase, diacritics and punctuation
+    stripped, glued ("S.à r.l." -> "sarl", "L.L.C." -> "llc")."""
+    joined = core.strip_diacritics(" ".join(tokens).lower())
+    return re.sub(r"[^a-z0-9]+", "", joined)
 
 
 def _peel_suffix(tokens: list[str]) -> tuple[list[str], tuple[str, ...]]:
     """Peel a trailing one- or two-token legal suffix.
+
+    Matching is on the suffix key, so dotted and accented surfaces
+    ("S.à r.l.", "L.L.C.", "B.V.", "S.A.R.L.") all resolve to the same entry.
 
     Returns (core tokens, suffix surfaces). The suffix surfaces exclude the
     dropped form; the caller adds the core alone. Returns the input tokens
     unchanged with an empty surface tuple when there is no suffix to peel.
     """
     if len(tokens) >= 3:
-        pair = (_bare(tokens[-2]), _bare(tokens[-1]))
-        if pair in _TWO_TOKEN_SUFFIXES:
-            return tokens[:-2], _TWO_TOKEN_SUFFIXES[pair]
+        key = _suffix_key(tokens[-2], tokens[-1])
+        if key in _SUFFIX_FORMS:
+            return tokens[:-2], _SUFFIX_FORMS[key]
     if len(tokens) >= 2:
-        key = _bare(tokens[-1])
+        key = _suffix_key(tokens[-1])
         if key in _SUFFIX_FORMS:
             return tokens[:-1], _SUFFIX_FORMS[key]
     return tokens, ()
@@ -195,7 +201,10 @@ def company_latin_variants(display: str) -> list[str]:
       case          -- Title Case | ALL CAPS (no all-lowercase)
       legal suffix  -- the observed spelling | alternate spellings | dropped
                       (Co./Co/Company, Ltd./Ltd/Limited, Inc./Incorporated,
-                      LLC/L.L.C., ...; two-token units like "Company, Ltd.")
+                      LLC/L.L.C., S.à r.l./S.A.R.L./SARL, ...; two-token units
+                      like "Company, Ltd."). Suffixes are matched on a
+                      punctuation- and diacritic-insensitive key, so dotted and
+                      accented surfaces resolve to the same entry.
       ampersand     -- `&` | `and` (standalone token only; AT&T is untouched)
       diacritics    -- keep | strip | German/Nordic digraph
       compound sep  -- hyphen | space
@@ -306,12 +315,20 @@ JUDGE_SYSTEM_PROMPT = (
 
 _JUDGE_CONTRACT = """\
 Decide in which of the eleven non-Latin scripts this organization's name could \
-realistically appear in a patent document: because the organization is from a \
-jurisdiction that writes in that script, or because a well-known conventional \
-form of the name exists in that script.
+realistically appear in a patent document. Two reasons qualify:
+  1. The organization is from a jurisdiction that writes in that script \
+(its name appears in that script in local documents); OR
+  2. The organization has a well-established conventional name in that \
+script's language, used in that jurisdiction's business/patent records.
 
-Do not pad: most organizations (especially Western ones) get an empty list. An \
-ordinary US/EU company name only appears in Latin script in patent documents.
+Western organizations qualify under (2) when they are internationally famous \
+and have a fixed local name (Apple -> 苹果/アップル/애플, Google -> 谷歌/グーグル/구글, \
+Siemens -> 西门子/シーメンス/시멘스, General Electric -> 通用电气/ゼネラル・エレクトリック). \
+Ordinary, non-famous Western organizations do NOT: in Chinese/Japanese/Korean \
+documents they are usually left in Latin script, so they get an empty list.
+
+Do not pad: include a script only when (1) or (2) genuinely holds. Most \
+organizations get an empty or short list.
 
 Scripts: cy Cyrillic, gk Greek, ab Arabic, cn Chinese, jp Japanese, kr Korean, \
 dv Devanagari, hb Hebrew, th Thai, gg Georgian, am Armenian.
@@ -319,10 +336,12 @@ dv Devanagari, hb Hebrew, th Thai, gg Georgian, am Armenian.
 Examples:
 "Samsung Electronics Co., Ltd." -> ["cn", "jp", "kr"]
 "Honda Motor Co., Ltd." -> ["cn", "jp", "kr"]
-"Siemens AG" -> ["cy"]
+"Siemens AG" -> ["cy", "cn", "jp", "kr"]
+"Apple Inc." -> ["cn", "jp", "kr"]
+"General Electric" -> ["cn", "jp", "kr"]
 "Saudi Arabian Oil Company" -> ["ab"]
 "Bal Seal Engineering, LLC" -> []
-"Google LLC" -> []
+"Acme Fasteners LLC" -> []
 
 ### Input
 """
@@ -613,11 +632,72 @@ def main(argv: list[str] | None = None) -> None:
                         parsed = {t: v for t, v in parsed.items() if t in tags}
                         script_vars_by_display.setdefault(display, {}).update(parsed)
 
+                # --- Filter; mini-retry judged tags that came back empty or were rejected ---
+                pending: list[tuple[str, tuple[str, ...], dict[str, list[str]]]] = []
+                # (display, tags, rejected values per tag)
                 for display, raw_vars in script_vars_by_display.items():
-                    filtered, _rejected = names_p1._filter_script_vars(
+                    filtered, rejected = names_p1._filter_script_vars(
                         display, _expand_company_script_variants(raw_vars)
                     )
                     script_vars_by_display[display] = filtered
+                    wanted = judge_by_display.get(display, ())
+                    missing = [t for t in SCRIPTS if t in wanted and not filtered.get(t)]
+                    if missing:
+                        pending.append(
+                            (
+                                display,
+                                tuple(t for t in SCRIPTS if t in missing),
+                                {t: rejected.get(t, []) for t in missing},
+                            )
+                        )
+
+                if pending:
+                    mini_params = names_p1._make_xlit_retry_sampling_params()
+                    mini_batch: list[tuple[str, tuple[str, ...], list[int]]] = []
+                    for display, tags, rejected in pending:
+                        prompt_ids = _apply_chat(
+                            tokenizer,
+                            [
+                                {"role": "system", "content": _xlit_system_prompt(tags)},
+                                {
+                                    "role": "user",
+                                    "content": names_p1._make_missing_scripts_message(display, list(tags), rejected),
+                                },
+                            ],
+                            tools=_emit_scripts_tools(tags),
+                            enable_thinking=False,
+                        )
+                        if not _prompt_fits(prompt_ids, MAX_TRANSLITERATE_TOKENS):
+                            log.warning(
+                                f"Skipping overlong mini-retry for '{display}' tags={list(tags)} "
+                                f"({len(prompt_ids)} tokens)"
+                            )
+                            continue
+                        mini_batch.append((display, tags, prompt_ids))
+                    if mini_batch:
+                        mini_outputs = llm.generate(
+                            [_tokens_prompt(ids) for _d, _t, ids in mini_batch],
+                            mini_params,
+                            use_tqdm=False,
+                        )
+                        for (display, tags, _ids), output in zip(mini_batch, mini_outputs):
+                            parsed = _parse_emit_scripts_output(output.outputs[0].text)
+                            if parsed is None:
+                                log.warning(f"No emit_scripts call on mini-retry for '{display}' (tags={list(tags)})")
+                                continue
+                            parsed = {t: v for t, v in parsed.items() if t in tags}
+                            extra, _extra_rej = names_p1._filter_script_vars(
+                                display, _expand_company_script_variants(parsed)
+                            )
+                            merged = script_vars_by_display.get(display, {})
+                            for tag in tags:
+                                if tag not in extra:
+                                    continue
+                                bucket = merged.setdefault(tag, [])
+                                for val in extra[tag]:
+                                    if val not in bucket:
+                                        bucket.append(val)
+                            script_vars_by_display[display] = merged
 
             written = 0
             for display, lat_vars in ready:

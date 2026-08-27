@@ -104,6 +104,41 @@ def test_input_case_does_not_leak() -> None:
     assert not any(v.islower() for v in variants)
 
 
+def test_dotted_accented_sarl_resolves_to_sarl() -> None:
+    variants = company_latin_variants("Europe Brands S.à r.l.")
+    assert "Europe Brands SARL" in variants
+    assert "EUROPE BRANDS SARL" in variants
+    assert "Europe Brands S.A.R.L." in variants
+    assert "EUROPE BRANDS S.A.R.L." in variants
+    assert "Europe Brands" in variants  # suffix dropped
+    assert not any("S.À" in v or "S.A R.L" in v for v in variants)  # no mangled accent-dots forms
+
+
+def test_dotted_suffixes_match_by_key() -> None:
+    assert "Acme LLC" in company_latin_variants("Acme L.L.C.")
+    assert "ACME LLC" in company_latin_variants("Acme L.L.C.")
+    assert "Acme" in company_latin_variants("Acme L.L.C.")
+    assert "Acme BV" in company_latin_variants("Acme B.V.")
+    assert "Acme KK" in company_latin_variants("Acme K.K.")
+    assert "Acme SARL" in company_latin_variants("Acme S.A.R.L.")
+    assert "Acme OOO" in company_latin_variants("Acme O.O.O.")
+
+
+def test_two_token_plain_suffixes() -> None:
+    variants = company_latin_variants("Acme Company Limited")
+    assert "Acme Co., Ltd." in variants
+    assert "Acme Company, Limited" in variants
+    assert "Acme" in variants
+    variants = company_latin_variants("Acme Corporation, Ltd.")
+    assert "Acme Corp., Ltd." in variants
+    assert "Acme" in variants
+
+
+def test_suffix_only_name_is_kept_whole() -> None:
+    variants = company_latin_variants("LLC")
+    assert variants == ["LLC"]
+
+
 def test_variant_list_is_capped_and_deduped() -> None:
     variants = company_latin_variants("Taiwan Semiconductor Manufacturing Company, Ltd.")
     assert len(variants) == len(set(variants))
