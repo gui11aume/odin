@@ -233,7 +233,12 @@ class OdinModel(nn.Module):
         decoder_input = torch.where(primed.unsqueeze(1), dec_primed, dec_unprimed)
         # Primed:   labels [tag, t0, t1, ...]    Unprimed: labels [t0, t1, ...]
         lab_primed = torch.cat([tags_col, target_ids], dim=1)
-        lab_unprimed = torch.cat([pad_col, target_ids], dim=1)
+        # Unprimed: input [BOS, t0, ...] predicts [t0, t1, ...] — the labels align
+        # with target_ids directly (a pad prefix here would shift the whole
+        # sequence back by one and train P(PAD | z, BOS) at the first
+        # generated position). Trailing pad keeps the shape equal to the
+        # primed labels, which carry the extra tag column.
+        lab_unprimed = torch.cat([target_ids, pad_col], dim=1)
         labels = torch.where(primed.unsqueeze(1), lab_primed, lab_unprimed)
         real_len = target_mask.sum(1)  # (NK,) real target tokens per row
         label_len = torch.where(primed, real_len + 1, real_len)
@@ -273,6 +278,77 @@ class OdinModel(nn.Module):
     # ------------------------------------------------------------------ #
     # Inference
     # ------------------------------------------------------------------ #
+    def log_prob(self, z: torch.Tensor, tag_id: int | None, token_ids: list[int]) -> tuple[float, list[float]]:
+        """Deterministic log-probability of one surface under the latent ``z``.
+
+        The inference-time counterpart of ``forward`` without reparameterization
+        noise (``z`` is used as-is, i.e. ``mu``) and without a batch: the surface
+        is teacher-forced in a single decoder pass.
+
+        Primed (``tag_id`` given): decoder input ``[BOS, tag, t0, ..., t_{n-2}]``,
+        predicting ``[tag, t0, ..., t_{n-1}]`` — the known-alphabet regime.
+        Unprimed (``tag_id=None``): decoder input ``[BOS, t0, ..., t_{n-2}]``,
+        predicting ``[t0, ..., t_{n-1}]`` — the unknown-alphabet regime, where
+        the first predicted token is the script itself.
+
+        Args:
+            z: Latent vector of shape ``(d,)`` or ``(1, d)`` (use ``mu``).
+            tag_id: Priming script tag token id, or ``None`` for unprimed.
+            token_ids: Surface token ids (no tag, no EOS).
+
+        Returns:
+            ``(total_logprob, per_token_logprobs)`` aligned with the predicted
+            tokens (``n+1`` entries when primed, ``n`` when unprimed).
+        """
+        ids = [int(t) for t in token_ids]
+        if tag_id is None:
+            prefix = [self.bos_token_id]
+            targets = ids
+        else:
+            prefix = [self.bos_token_id, int(tag_id)]
+            targets = [int(tag_id)] + ids
+        dec_ids = prefix + ids[:-1]  # teacher-force up to the penultimate token
+        if len(targets) == 0:
+            raise ValueError("token_ids must contain at least one token.")
+
+        was_training = self.training
+        if was_training:
+            self.eval()
+        try:
+            with torch.no_grad():
+                z = z.view(1, -1).to(next(self.parameters()).device)
+                device = z.device
+                if self.decoder_family == "modernbert":
+                    assert self.z_proj is not None
+                    embed = self._decoder_embed_module()
+                    emb = torch.cat(
+                        [
+                            self.z_proj(z).unsqueeze(1),
+                            embed(torch.tensor([dec_ids], dtype=torch.long, device=device)),
+                        ],
+                        dim=1,
+                    )
+                    position_ids = torch.arange(emb.shape[1], device=device).unsqueeze(0)
+                    hidden = self.decoder(inputs_embeds=emb, position_ids=position_ids).last_hidden_state
+                    logits = self.lm_head(hidden)[:, 1:]
+                else:
+                    # T5 takes the latent as cross-attention memory, so its
+                    # hidden states align 1:1 with dec_ids (no z prefix to skip).
+                    memory = z.unsqueeze(1)
+                    memory_mask = torch.ones(1, 1, dtype=torch.long, device=device)
+                    hidden = self.decoder(
+                        input_ids=torch.tensor([dec_ids], dtype=torch.long, device=device),
+                        encoder_hidden_states=memory,
+                        encoder_attention_mask=memory_mask,
+                    ).last_hidden_state
+                    logits = self.lm_head(hidden)
+                log_probs = F.log_softmax(logits, dim=-1)
+                per_token = [float(log_probs[0, j, targets[j]]) for j in range(len(targets))]
+                return sum(per_token), per_token
+        finally:
+            if was_training:
+                self.train()
+
     def _sample(
         self, logits: torch.Tensor, temperature: float, top_p: float | None, generator: torch.Generator | None
     ) -> torch.Tensor:

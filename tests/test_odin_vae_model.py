@@ -236,3 +236,61 @@ def test_kl_weight_zero_drops_kl() -> None:
     out = model(**make_batch())
     assert torch.isfinite(out["loss"])
     assert out["loss"].item() == pytest.approx(out["ce"].item(), rel=1e-5)
+
+
+def _freeze_variance(model: OdinModel) -> None:
+    """Make the reparameterized sample collapse to mu (std ~ 1e-9)."""
+    model.logvar_head.weight.data.zero_()
+    model.logvar_head.bias.data.fill_(-40.0)
+
+
+@pytest.mark.parametrize("decoder", ["modernbert", "t5"])
+def test_log_prob_shape_finite_deterministic(decoder: str) -> None:
+    model = make_model(decoder).eval()
+    z = torch.randn(model.config.hidden_size)
+    ids = [5, 6, 7]
+    total_p, per_p = model.log_prob(z, TAGS[0], ids)
+    total_u, per_u = model.log_prob(z, None, ids)
+    # Primed predicts the tag token first, then the surface; unprimed the surface.
+    assert len(per_p) == len(ids) + 1
+    assert len(per_u) == len(ids)
+    assert all(torch.isfinite(torch.tensor(v)) for v in per_p + per_u)
+    assert total_p == pytest.approx(sum(per_p), abs=1e-6)
+    # Deterministic, and sensitive to the input surface.
+    assert model.log_prob(z, TAGS[0], ids) == (total_p, per_p)
+    assert model.log_prob(z, TAGS[0], [5, 6, 8])[0] != total_p
+
+
+def test_log_prob_single_token_surface() -> None:
+    model = make_model().eval()
+    z = torch.zeros(model.config.hidden_size)
+    total_p, per_p = model.log_prob(z, TAGS[1], [9])
+    total_u, per_u = model.log_prob(z, None, [9])
+    assert len(per_p) == 2
+    assert len(per_u) == 1
+    assert all(torch.isfinite(torch.tensor(v)) for v in per_p + per_u)
+
+
+@pytest.mark.parametrize("primed", [True, False])
+@pytest.mark.parametrize("decoder", ["modernbert", "t5"])
+def test_log_prob_matches_forward_ce(decoder: str, primed: bool) -> None:
+    """With the variance frozen, forward's CE on a single target row must equal
+    the mean per-token NLL returned by log_prob (teacher-forcing alignment)."""
+    model = make_model(decoder).eval()  # eval: dropout off, so forward is deterministic
+    _freeze_variance(model)
+    torch.manual_seed(7)
+    ids = [4, 11, 19, 25]
+    n = len(ids)
+    l_out = n + 2  # real tokens + padding tail
+    batch = make_batch(b=1, k_in=2, k_out=1, l_in=5, l_out=l_out, primed=primed)
+    batch["target_ids"] = torch.tensor([[*ids, PAD, PAD]], dtype=torch.long)
+    batch["target_mask"] = torch.tensor([[1] * n + [0, 0]], dtype=torch.long)
+    batch["target_tags"] = torch.tensor([TAGS[3]], dtype=torch.long)
+    batch["target_primed"] = torch.tensor([1 if primed else 0], dtype=torch.long)
+    out = model(**batch)
+    mu, _ = model.encode(batch["surf_ids"], batch["surf_mask"], k_per_cluster=batch["k_per_cluster"])
+    tag_id = TAGS[3] if primed else None
+    total, per = model.log_prob(mu[0], tag_id, ids)
+    assert out["ce"].item() == pytest.approx(-sum(per) / len(per), abs=1e-4)
+    # The primed prediction includes the tag token; unprimed starts from t0.
+    assert len(per) == n + (1 if primed else 0)
