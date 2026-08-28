@@ -67,7 +67,7 @@ training:
   devices: 2
   strategy: ddp
   precision: bf16-mixed
-  max_epochs: 3
+  max_epochs: 5
   # <= 0: auto -> one full pass over the train shards per epoch (per rank).
   limit_train_batches: -1
   val_check_interval: 1.0
