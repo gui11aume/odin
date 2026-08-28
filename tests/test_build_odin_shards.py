@@ -118,6 +118,53 @@ def test_minimal_build_round_trip(tmp_path: Path) -> None:
     assert set("value") <= la_letters
 
 
+def test_build_with_explicit_val_input(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus.txt"
+    n = 8
+    corpus.write_text("\n".join(make_line(i) for i in range(n)) + "\n", encoding="utf-8")
+    # Val = one line that also appears in the corpus (leakage guard) plus one
+    # external line not present in the corpus at all.
+    val_file = tmp_path / "val.txt"
+    external = "\t".join(f"{tag}{{ext-{tag}}}" for tag in SCRIPTS)
+    val_file.write_text(make_line(3) + "\n" + external + "\n", encoding="utf-8")
+    out = tmp_path / "wds"
+    _builder.main(
+        [
+            "--input",
+            str(corpus),
+            "--output",
+            str(out),
+            "--workers",
+            "1",
+            "--shard-size",
+            "4",
+            "--val-input",
+            str(val_file),
+        ]
+    )
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["val_input"] == str(val_file)
+    assert manifest["n_val"] == 2
+    assert manifest["n_train"] == 7  # 8 corpus lines minus the one overlapping val line
+    assert manifest["n_train_shards"] == 2
+    assert manifest["n_val_shards"] == 1
+
+    records = {
+        item["__key__"]: json.loads(item["json"])
+        for item in GrandWebDataset(f"{out}/{manifest['train_pattern']}", seed=123, is_endless=False)
+    }
+    assert len(records) == 7
+    assert all(rec["cells"][0] != "value-3-la" for rec in records.values())  # val line never trained on
+
+    val_records = [
+        json.loads(item["json"])
+        for item in GrandWebDataset(f"{out}/{manifest['val_pattern']}", seed=123, is_endless=False)
+    ]
+    # File order preserved: the corpus line first, then the external line.
+    assert [rec["cells"][0] for rec in val_records] == ["value-3-la", "ext-la"]
+
+
 def test_build_counts_malformed(tmp_path: Path) -> None:
     corpus = tmp_path / "corpus.txt"
     lines = [make_line(0), "garbage-line", make_line(1)]

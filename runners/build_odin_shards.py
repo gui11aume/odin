@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import io
 import json
 import logging
 import shutil
@@ -32,6 +33,7 @@ import tarfile
 import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 
 import webdataset as wds
@@ -102,8 +104,16 @@ def val_index_set(total: int, val_size: int) -> set[int]:
     return {(k * total) // val_size for k in range(val_size)}
 
 
-def phase_a(input_path: Path, work_dir: Path, shard_size: int, val_size: int, limit: int = 0) -> dict:
-    """Count, split train/val, write the flat files, offsets, and letter frequencies."""
+def phase_a(
+    input_path: Path, work_dir: Path, shard_size: int, val_size: int, limit: int = 0, val_input: Path | None = None
+) -> dict:
+    """Count, split train/val, write the flat files, offsets, and letter frequencies.
+
+    With ``val_input`` given, those lines are the val set verbatim (file order,
+    deduped) and the stratified selection is skipped; any val line that also
+    appears in the input is skipped there (leakage guard). Otherwise val is
+    drawn from the input by the deterministic stratified scheme.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     flat_path = work_dir / "flat_train.txt"
     val_path = work_dir / "flat_val.txt"
@@ -114,10 +124,27 @@ def phase_a(input_path: Path, work_dir: Path, shard_size: int, val_size: int, li
     t0 = time.time()
     total = count_lines(input_path, limit)
     log.info("Phase A.1: %d lines in %.1fs", total, time.time() - t0)
-    n_val = min(val_size, total // 2)
-    n_train = total - n_val
+
+    val_lines: list[str] = []
+    val_set: set[str] = set()
+    if val_input is not None:
+        for line in iter_lines(val_input):
+            text = line.rstrip("\r\n")
+            if text and text not in val_set:
+                val_set.add(text)
+                val_lines.append(text)
+        n_val = len(val_lines)
+        n_train = total  # adjusted below if any val lines appear in the input
+        val_indices = None
+        log.info("Phase A: %d explicit val lines from %s (stratified selection skipped)", n_val, val_input)
+        with open(val_path, "wb") as val:
+            for text in val_lines:
+                val.write((text + "\n").encode("utf-8"))
+    else:
+        n_val = min(val_size, total // 2)
+        n_train = total - n_val
+        val_indices = val_index_set(total, n_val)
     n_shards = (n_train + shard_size - 1) // shard_size
-    val_indices = val_index_set(total, n_val)
 
     log.info("Phase A.2: writing flat files (n_train=%d, n_val=%d, n_shards=%d) ...", n_train, n_val, n_shards)
     t0 = time.time()
@@ -126,7 +153,13 @@ def phase_a(input_path: Path, work_dir: Path, shard_size: int, val_size: int, li
     offsets: list[int] = []
     train_line_idx = 0
     val_line_idx = 0
-    with open(flat_path, "wb") as flat, open(val_path, "wb") as val:
+    val_overlap = 0
+    # The val file is written from the stream only for the stratified split; for an
+    # explicit --val-input it was already written above and must not be
+    # re-opened (that would truncate it), so a throwaway sink is used.
+    with ExitStack() as stack:
+        flat = stack.enter_context(open(flat_path, "wb"))
+        val = stack.enter_context(open(val_path, "wb") if val_indices is not None else io.BytesIO())
         for i, line in enumerate(iter_lines(input_path)):
             if limit and i >= limit:
                 break
@@ -139,10 +172,13 @@ def phase_a(input_path: Path, work_dir: Path, shard_size: int, val_size: int, li
                 if tag in CORPUSE_ALPHA_SCRIPTS:
                     freq.update((f"{tag}|{ch}" for ch in cell if ch.isalpha()))
             data = line if line.endswith("\n") else line + "\n"
-            if i in val_indices:
+            if val_indices is not None and i in val_indices:
                 val.write(data.encode("utf-8"))
                 val_line_idx += 1
                 continue
+            if val_set and line.rstrip("\n") in val_set:
+                val_overlap += 1
+                continue  # val line present in the train input: never train on it
             if train_line_idx % shard_size == 0:
                 offsets.append(flat.tell())
             flat.write(data.encode("utf-8"))
@@ -174,12 +210,15 @@ def phase_a(input_path: Path, work_dir: Path, shard_size: int, val_size: int, li
     with open(freq_path, "w", encoding="utf-8") as fh:
         json.dump(letter_freqs, fh, ensure_ascii=False)
 
+    if val_overlap:
+        log.warning("Phase A: %d val lines also appeared in the train input and were skipped.", val_overlap)
     stats = {
         "total": total,
         "n_train": n_train,
-        "n_val": val_line_idx,
+        "n_val": val_line_idx if val_indices is not None else n_val,
         "n_shards": n_shards,
         "malformed": malformed,
+        "val_overlap": val_overlap,
         "phase_a_seconds": round(time.time() - t0, 1),
     }
     log.info("Phase A done: %s (%.1fs)", stats, stats["phase_a_seconds"])
@@ -301,6 +340,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--val-size", type=int, default=4000, help="Number of val clusters (default 4000).")
     parser.add_argument("--workers", type=int, default=8, help="Phase B worker processes (default 8).")
     parser.add_argument("--limit", type=int, default=0, help="Only process the first N clusters (0 = all).")
+    parser.add_argument(
+        "--val-input",
+        default=None,
+        help="Explicit val corpus (.txt/.txt.gz): used verbatim as the val set (file order), "
+        "and its lines are skipped in the train input; the stratified --val-size selection is skipped.",
+    )
     args = parser.parse_args(argv)
 
     input_path = Path(args.input)
@@ -313,14 +358,23 @@ def main(argv: list[str] | None = None) -> None:
     for d in (train_dir, val_dir, work_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    val_input_path = None
+    if args.val_input is not None:
+        val_input_path = Path(args.val_input)
+        if not val_input_path.is_file():
+            raise SystemExit(f"Val input not found: {val_input_path}")
+        if args.val_size != 4000:
+            log.warning("--val-input given: --val-size %d is ignored (explicit val lines win).", args.val_size)
+
     t_start = time.time()
-    stats = phase_a(input_path, work_dir, args.shard_size, args.val_size, args.limit)
+    stats = phase_a(input_path, work_dir, args.shard_size, args.val_size, args.limit, val_input=val_input_path)
     shard_results = phase_b(work_dir, train_dir, val_dir, args.shard_size, args.workers, stats)
 
     n_train_shards = len(shard_results["train"])
     n_val_shards = len(shard_results["val"])
     manifest = {
         "input": str(input_path),
+        "val_input": str(val_input_path) if val_input_path else None,
         "shard_size": args.shard_size,
         "n_total": stats["total"],
         "n_train": stats["n_train"],
@@ -329,8 +383,8 @@ def main(argv: list[str] | None = None) -> None:
         "n_val_shards": n_val_shards,
         "workers": args.workers,
         "total_seconds": round(time.time() - t_start, 1),
-        "train_pattern": f"train/shard-{{000000..{n_train_shards - 1:06d}}}.tar.gz",
-        "val_pattern": f"val/shard-{{000000..{n_val_shards - 1:06d}}}.tar.gz",
+        "train_pattern": f"train/shard-{{000000..{n_train_shards - 1:06d}}}.tar.gz" if n_train_shards else None,
+        "val_pattern": f"val/shard-{{000000..{n_val_shards - 1:06d}}}.tar.gz" if n_val_shards else None,
     }
     with open(output_root / "manifest.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
