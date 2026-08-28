@@ -21,7 +21,9 @@ format_cells = _mod.format_cells
 class _FakeTokenizer:
     """One token per character: a cell's token count is 1 (tag) + len(value)."""
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+    def encode(self, text, add_special_tokens: bool = False):
+        if isinstance(text, list):  # batch
+            return [[0] * len(t) for t in text]
         return [0] * len(text)
 
     def convert_tokens_to_ids(self, tok: str) -> int:
@@ -78,6 +80,7 @@ def test_merge_pool_val_and_pruning(tmp_path: Path) -> None:
         "la{F}\tla{" + "y" * 60 + "}",  # long cell pruned
         "la{G}",
         "la{H}",
+        "la{" + "z" * 60 + "}\tcy{абв}",  # only the la cell is overlong -> line dead (no la left)
     ]
     companies.write_text("\n".join(comp_lines) + "\n", encoding="utf-8")
 
@@ -87,7 +90,8 @@ def test_merge_pool_val_and_pruning(tmp_path: Path) -> None:
     pool_out = tmp_path / "pool.txt.gz"
     val_out = tmp_path / "val.txt.gz"
     tok = _FakeTokenizer()
-    holdout = pick_holdout(4, 1, seed=123)
+    holdout = pick_holdout(5, 1, seed=123)
+    assert holdout != {4}, "test assumes the dead line is not held out"
     stats = merge(
         inventor,
         companies,
@@ -105,13 +109,16 @@ def test_merge_pool_val_and_pruning(tmp_path: Path) -> None:
 
     # Old val line never trained on; inventor order preserved; pruned cells gone.
     inventor_pool = ["la{A}\tla{AA}", "la{C}\tla{CC}", "la{D}"]
-    # Company pool keeps file order, skips the holdout, prunes the long cell.
+    # Company pool keeps file order, skips the holdout and the dead line (idx 4,
+    # whose only la cell is overlong), and prunes the long cell at idx 1.
     comp_pool = []
     for i, ln in enumerate(comp_lines):
-        if i in holdout:
+        if i in holdout or i == 4:
             continue
         comp_pool.append(ln.replace("\tla{" + "y" * 60 + "}", "") if i == 1 else ln)
     assert pool == inventor_pool + comp_pool
+    # The dead line's surviving cy cell is nowhere in the pool.
+    assert "cy{абв}" not in "\t".join(pool)
     # Val: old val verbatim, then the single company holdout (in file order).
     assert val[0] == "la{B}\tla{BB}"
     assert len(val) == 2
@@ -124,7 +131,8 @@ def test_merge_pool_val_and_pruning(tmp_path: Path) -> None:
 
     assert stats["inventor_skipped_val"] == 1
     assert stats["inventor_pruned_cells"] == 1
-    assert stats["company_pruned_cells"] == 1
+    assert stats["company_pruned_cells"] == 2  # idx1 (y*60) + idx4 (z*60)
+    assert stats["company_dead_dropped"] == 1  # idx4 lost its only la cell
     assert stats["company_holdout"] == 1
     assert stats["pool_total"] == 6
     assert stats["val_total"] == 2

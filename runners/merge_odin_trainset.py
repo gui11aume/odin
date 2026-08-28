@@ -60,14 +60,32 @@ def format_cells(cells: list[tuple[str, str]]) -> str:
 
 
 def drop_overlong_cells(cells: list[tuple[str, str]], tokenizer, max_tokens: int) -> tuple[list[tuple[str, str]], int]:
-    """Drop cells whose tag token + surface exceeds max_tokens (collator rule)."""
+    """Drop cells whose tag token + surface exceeds max_tokens (collator rule).
+
+    Fast path: a byte-BPE token is at least one byte, so a surface of at most
+    max_tokens-1 UTF-8 bytes cannot exceed the limit without tokenizing. Only
+    the remaining cells are batch-tokenized.
+    """
+    limit_bytes = max_tokens - 1
+    flags: list[bool | None] = []
+    pending: list[tuple[int, str, str]] = []  # (index, tag, value)
+    for tag, value in cells:
+        if len(value.encode("utf-8")) <= limit_bytes:
+            flags.append(True)
+        else:
+            pending.append((len(flags), tag, value))
+            flags.append(None)
+    if pending:
+        encodings = tokenizer.encode([v for _i, _t, v in pending], add_special_tokens=False)
+        for (i, _t, _v), ids in zip(pending, encodings):
+            flags[i] = 1 + len(ids) <= max_tokens
     kept: list[tuple[str, str]] = []
     dropped = 0
-    for tag, value in cells:
-        if 1 + len(tokenizer.encode(value, add_special_tokens=False)) > max_tokens:
+    for ok, (tag, value) in zip(flags, cells):
+        if ok:
+            kept.append((tag, value))
+        else:
             dropped += 1
-            continue
-        kept.append((tag, value))
     return kept, dropped
 
 
@@ -107,16 +125,19 @@ def merge(
 
     pruned: list[list[tuple[str, str]] | None] = []
     company_dropped = 0
-    company_empty = 0
+    company_dead = 0
     for line in company_lines:
         parsed = parse_line(line)
         if parsed is None:
             raise RuntimeError(f"Malformed company line (input should be phase-3 clean): {line[:120]!r}")
         cells, dropped = drop_overlong_cells(list(zip(parsed[0], parsed[1])), tokenizer, max_tokens)
         company_dropped += dropped
-        if not cells:
-            company_empty += 1
-        pruned.append(cells if cells else None)
+        # A line whose only overlong cells were its la cells is useless: the
+        # shard builder requires at least one la cell, and a truncated one
+        # would be a cut-off label.
+        if not cells or not any(tag == "la" for tag, _ in cells):
+            company_dead += 1
+        pruned.append(cells if cells and any(tag == "la" for tag, _ in cells) else None)
 
     val_holdout: list[str] = []
     pool_companies: list[str] = []
@@ -129,9 +150,9 @@ def merge(
         else:
             pool_companies.append(text)
     log.info(
-        "company pruned cells: %d, empty lines dropped: %d, holdout lines: %d",
+        "company pruned cells: %d, dead lines dropped (no la left): %d, holdout lines: %d",
         company_dropped,
-        company_empty,
+        company_dead,
         len(val_holdout),
     )
 
@@ -146,6 +167,7 @@ def merge(
     inventor_dropped = 0
     inventor_kept = 0
     inventor_skipped_val = 0
+    inventor_dead = 0
     with open_out_gz(pool_out) as pool_fh:
         for line in iter_lines(inventor):
             text = line.rstrip("\r\n")
@@ -156,10 +178,11 @@ def merge(
             if parsed is None:
                 raise RuntimeError(f"Malformed inventor line (input should be phase-3 clean): {text[:120]!r}")
             cells, dropped = drop_overlong_cells(list(zip(parsed[0], parsed[1])), tokenizer, max_tokens)
-            if not cells:
-                log.warning("Dropped inventor line left empty after pruning: %r", text[:120])
-                continue
             inventor_dropped += dropped
+            if not cells or not any(tag == "la" for tag, _ in cells):
+                inventor_dead += 1
+                log.warning("Dropped inventor line left without an la cell after pruning: %r", text[:120])
+                continue
             print(format_cells(cells), file=pool_fh)
             inventor_kept += 1
         for text in pool_companies:
@@ -169,11 +192,12 @@ def merge(
         "old_val": len(val_lines),
         "company_lines": len(company_lines),
         "company_pruned_cells": company_dropped,
-        "company_empty_dropped": company_empty,
+        "company_dead_dropped": company_dead,
         "company_holdout": len(val_holdout),
         "company_to_pool": len(pool_companies),
         "inventor_skipped_val": inventor_skipped_val,
         "inventor_pruned_cells": inventor_dropped,
+        "inventor_dead_dropped": inventor_dead,
         "inventor_to_pool": inventor_kept,
         "pool_total": inventor_kept + len(pool_companies),
         "val_total": len(val_lines) + len(val_holdout),
