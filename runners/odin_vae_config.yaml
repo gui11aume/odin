@@ -10,7 +10,9 @@ splits:
       pattern: "train/shard-{000000..002189}.tar.gz"
       n_instances_per_shard: 2048
     dataloader:
-      batch_size: 256
+      # Sweep stage 1+2 winner: smaller effective batch beats 256/512/1024
+      # monotonically at lr 5e-4 (more optimizer steps per epoch under OneCycle).
+      batch_size: 128
       drop_last_batch: false
       num_workers: 4
       persistent_workers: false
@@ -55,7 +57,8 @@ model:
 
 training:
   lr: 5.0e-4
-  lr_warmup_ratio: 0.05
+  # Sweep: 0.02 edged out 0.05/0.1 at the 1-epoch point (2.154 vs 2.160/2.168).
+  lr_warmup_ratio: 0.02
   optimizer: AdamW
   optimizer_kwargs:
     betas: [0.9, 0.999]
