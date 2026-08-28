@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import tarfile
 from pathlib import Path
 from typing import Any, cast
@@ -28,6 +29,18 @@ from .augment import SCRIPTS
 from .model import OdinModel
 
 _TAG_PREFIX = "["
+
+
+def one_cycle_total_steps(per_epoch_batches: float, max_epochs: int, accumulate_grad_batches: int) -> int:
+    """Optimizer steps OneCycleLR must cover.
+
+    Lightning steps the scheduler per optimizer step, and a trailing partial
+    accumulation group at the end of the epoch limit still triggers a step, so
+    each epoch contributes ``ceil(per_epoch / accum)`` steps. Truncating the
+    division undercounts by one whenever the division is inexact (crash:
+    ``Tried to step N times. The specified number of total steps is N-1``).
+    """
+    return max(1, math.ceil(per_epoch_batches / accumulate_grad_batches) * max(1, max_epochs))
 
 
 class OdinVAELightningHarness(pl.LightningModule):
@@ -70,7 +83,7 @@ class OdinVAELightningHarness(pl.LightningModule):
         per_epoch = float(limit) if isinstance(limit, int) and limit > 0 else float(trainer.num_training_batches)
         if per_epoch == float("inf") or per_epoch <= 0:
             raise ValueError("Cannot resolve the number of train batches per epoch for the LR schedule.")
-        total_steps = max(1, int(per_epoch * float(trainer.max_epochs or 1) / trainer.accumulate_grad_batches))
+        total_steps = one_cycle_total_steps(per_epoch, trainer.max_epochs or 1, trainer.accumulate_grad_batches)
 
         lr_scheduler_cfg: LRSchedulerConfig = cast(
             LRSchedulerConfig,

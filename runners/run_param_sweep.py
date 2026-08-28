@@ -40,7 +40,7 @@ import helpers  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-KNOWN_KEYS = ("lr", "batch", "accum", "epochs", "warmup")
+KNOWN_KEYS = ("lr", "batch", "accum", "epochs", "warmup", "wd")
 FIELDNAMES = [
     "combo",
     "lr",
@@ -48,6 +48,7 @@ FIELDNAMES = [
     "accum",
     "effective_batch",
     "warmup",
+    "wd",
     "epochs",
     "gpu",
     "final_val_loss",
@@ -93,6 +94,9 @@ def build_combo_config(base: dict, combo: dict[str, float], *, tag: str, epochs:
     training["accumulate_grad_batches"] = int(combo.get("accum", 1))
     if "warmup" in combo:
         training["lr_warmup_ratio"] = combo["warmup"]
+
+    if "wd" in combo:
+        training["optimizer_kwargs"]["weight_decay"] = combo["wd"]
     training["enable_checkpointing"] = False
     training["devices"] = 1
     training["strategy"] = "auto"
@@ -241,6 +245,7 @@ def main(argv: list[str] | None = None) -> None:
                     "effective_batch": info["cfg"]["splits"]["train"]["dataloader"]["batch_size"]
                     * info["cfg"]["training"]["accumulate_grad_batches"],
                     "warmup": info["cfg"]["training"].get("lr_warmup_ratio"),
+                    "wd": info["cfg"]["training"]["optimizer_kwargs"].get("weight_decay"),
                     "epochs": info["cfg"]["training"]["max_epochs"],
                     "gpu": info["gpu"],
                     "duration_s": round(duration, 1),
