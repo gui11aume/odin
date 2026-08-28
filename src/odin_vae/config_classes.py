@@ -140,6 +140,9 @@ class ConfigForHarness(pydantic.BaseModel):
     generation_log_every_n_steps: int = pydantic.Field(default=500, ge=1)
     n_generation_clusters: int = pydantic.Field(default=3, ge=1)
     checkpoint_path: str | None = pydantic.Field(default=None)
+    # Sub-directory name under the CSVLogger root (lightning_logs/<name>/).
+    # Parameter sweeps set a unique name per combo so log dirs are unambiguous.
+    log_name: str = pydantic.Field(default="odin_vae")
 
 
 class ConfigForDataModule(pydantic.BaseModel):

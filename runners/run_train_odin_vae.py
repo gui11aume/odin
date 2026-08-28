@@ -141,7 +141,7 @@ if __name__ == "__main__":
     if training_cfg.checkpoint_path and (ckpt_path is None or not ckpt_path.is_file()):
         raise FileNotFoundError(f"checkpoint_path not found: {training_cfg.checkpoint_path}")
 
-    csv_logger = CSVLogger("lightning_logs", name="odin_vae")
+    csv_logger = CSVLogger("lightning_logs", name=training_cfg.log_name)
     callbacks: list[pl.Callback] = [RichProgressBar(theme=RichProgressBarTheme(metrics_format=".6g"))]
     if training_cfg.enable_checkpointing:
         checkpoint_kwargs = dict(dirpath=str(csv_logger.log_dir), auto_insert_metric_name=False, save_top_k=-1)
