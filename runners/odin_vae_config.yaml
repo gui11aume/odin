@@ -7,7 +7,7 @@ data_root: /mnt/nvme1/odin_wds
 splits:
   train:
     dataset:
-      pattern: "train/shard-{000000..002080}.tar.gz"
+      pattern: "train/shard-{000000..002189}.tar.gz"
       n_instances_per_shard: 2048
     dataloader:
       batch_size: 256
@@ -17,10 +17,10 @@ splits:
       pin_memory: true
   val:
     dataset:
-      pattern: "val/shard-{000000..000001}.tar.gz"
+      pattern: "val/shard-{000000..000002}.tar.gz"
       n_instances_per_shard: 2048
-    # 2 val shards / 2 DDP ranks = 1 shard per rank: a single worker keeps
-    # every worker non-empty (webdataset's check_empty would otherwise fire).
+    # 3 val shards / 2 DDP ranks -> 2+1 split: a single worker keeps every
+    # rank non-empty (webdataset's check_empty would otherwise fire).
     dataloader:
       batch_size: 256
       drop_last_batch: false
@@ -36,8 +36,9 @@ augmentation:
   k_input: 4
   k_latin_target: 4
   k_non_latin_target: 2
-  # Covers 100% of real surfaces (max 43 tokens, dv) incl. the tag; the cap is
-  # the batch's padded length, so keeping it tight is what keeps memory flat.
+  # Cap on surface length incl. the tag token; the batch's padded length, so
+  # keeping it tight is what keeps memory flat. v2 surfaces longer than the
+  # cap were dropped at merge time (runners/merge_odin_trainset.py).
   max_surface_tokens: 48
 
 model:
