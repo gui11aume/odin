@@ -101,12 +101,24 @@ def build_combo_config(base: dict, combo: dict[str, float], *, tag: str, epochs:
         cfg["splits"]["train"]["dataloader"]["batch_size"] = int(combo["batch"])
     if shards is not None:
         cfg["splits"]["train"]["dataset"]["pattern"] = f"train/shard-{{000000..{shards - 1:06d}}}.tar.gz"
+        # The entry point's auto limit reads the full-corpus manifest, so a
+        # sharded smoke run needs an explicit epoch length or the endless
+        # stream recycles the shards until the full-corpus batch count.
+        batch = cfg["splits"]["train"]["dataloader"]["batch_size"]
+        n_instances = shards * int(cfg["splits"]["train"]["dataset"]["n_instances_per_shard"])
+        cfg["training"]["limit_train_batches"] = max(1, (n_instances + batch - 1) // batch)
     return cfg
 
 
 def read_metrics(log_name: str, repo_root: Path) -> dict:
-    """Final + per-epoch val metrics from a combo's CSVLogger file."""
-    metrics_csv = repo_root / "lightning_logs" / log_name / "metrics.csv"
+    """Final + per-epoch val metrics from a combo's CSVLogger file.
+
+    The entry point pre-creates the log dir (config snapshot), so CSVLogger
+    nests its output in a ``version_0`` sub-directory; glob covers both.
+    """
+    candidates = sorted((repo_root / "lightning_logs" / log_name).glob("version_*/metrics.csv"))
+    direct = repo_root / "lightning_logs" / log_name / "metrics.csv"
+    metrics_csv = candidates[-1] if candidates else direct
     with open(metrics_csv, newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     history: list[dict] = []
@@ -123,6 +135,10 @@ def read_metrics(log_name: str, repo_root: Path) -> dict:
             )
     if not history:
         raise ValueError(f"No val_loss rows in {metrics_csv}")
+    # train_epoch metrics land in their own row; take the last one available.
+    train_rows = [row for row in rows if row.get("train_loss")]
+    if train_rows:
+        history[-1]["train_loss"] = float(train_rows[-1]["train_loss"])
     return {"final": history[-1], "history": history}
 
 
