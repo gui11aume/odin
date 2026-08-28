@@ -190,7 +190,8 @@ if __name__ == "__main__":
         limit_train_batches=limit_train_batches,
         limit_val_batches=training_cfg.limit_val_batches,
         max_epochs=training_cfg.max_epochs,
-        max_steps=training_cfg.max_steps,
+        # Lightning rejects max_steps=None; -1 (its default) means unbounded.
+        max_steps=training_cfg.max_steps if training_cfg.max_steps is not None else -1,
         enable_checkpointing=training_cfg.enable_checkpointing,
         log_every_n_steps=training_cfg.log_every_n_steps,
         logger=csv_logger,
