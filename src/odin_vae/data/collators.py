@@ -42,14 +42,18 @@ class OdinVAECollator:
         augmenter: LetterAugmenter,
         *,
         k_input: int = 4,
+        k_input_weights: list[float] | None = None,
         k_latin_target: int = 4,
         k_non_latin_target: int = 2,
         max_tokens: int = 128,
         seed: int = 123,
     ):
+        if k_input_weights is not None and len(k_input_weights) != k_input:
+            raise ValueError(f"k_input_weights has {len(k_input_weights)} entries but k_input is {k_input}.")
         self.tokenizer = tokenizer
         self.augmenter = augmenter
         self.k_input = k_input
+        self.k_input_weights = k_input_weights
         self.k_latin_target = k_latin_target
         self.k_non_latin_target = k_non_latin_target
         self.max_tokens = max_tokens
@@ -100,9 +104,10 @@ class OdinVAECollator:
     def _select(self, tags: list[str], n: int, rng: random.Random) -> tuple[list[int], list[int]]:
         """Return (input indices, target indices) for one cluster.
 
-        The number of inputs is drawn uniformly from ``1..k_input`` (a random
-        subset of the ``k_input`` candidates, so the disjointness from the
-        targets — computed against the full candidate set — is preserved).
+        The number of inputs is drawn from ``1..k_input`` — uniformly by default,
+        or with the configured ``k_input_weights`` (a random subset of the
+        ``k_input`` candidates, so the disjointness from the targets —
+        computed against the full candidate set — is preserved).
         The targets are always exactly ``k_latin_target + k_non_latin_target``
         (the model relies on a fixed count per cluster); each target keeps
         its own true script tag.
@@ -115,7 +120,8 @@ class OdinVAECollator:
         targets = self._pick(latin, used, self.k_latin_target, non_latin, any_cell, rng)
         used.update(targets)
         targets += self._pick(non_latin, used, self.k_non_latin_target, latin, any_cell, rng)
-        k = rng.randint(1, self.k_input)
+        # weights=None => uniform over 1..k_input (matches the classic behavior)
+        k = rng.choices(range(1, self.k_input + 1), weights=self.k_input_weights)[0]
         input_idx = rng.sample(input_candidates, min(k, len(input_candidates)))
         return input_idx, targets
 

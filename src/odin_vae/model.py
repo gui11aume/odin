@@ -210,15 +210,20 @@ class OdinModel(nn.Module):
                 unprimed rows decode from the latent alone (``[BOS, t0, ...]``,
                 labels ``[t0, ...]``), the unknown-alphabet regime.
 
+        The reconstruction term is the multi-sample ELBO estimate: ``S =
+        num_latent_samples`` latents are drawn from the posterior and decoded
+        (``S = 1`` is the classic estimator); CE is averaged over the samples,
+        so the loss scale — and hence ``kl_weight`` — is unaffected by ``S``.
+
         Returns a dict with ``loss`` (CE + ``kl_weight`` * KL), ``ce`` and ``kl``.
         """
         b = k_per_cluster.shape[0]
         mu, logvar = self.encode(surf_ids, surf_mask, k_per_cluster=k_per_cluster)
         std = torch.exp(0.5 * logvar)
-        z = mu + std * torch.randn_like(std)
+        s = self.config.num_latent_samples
+        eps = torch.randn(s, b, mu.shape[1], device=mu.device)
 
         k_out = target_ids.shape[0] // b
-        z_rep = z.repeat_interleave(k_out, dim=0)  # (NK, d)
         device = target_ids.device
 
         nk = target_ids.shape[0]
@@ -247,33 +252,44 @@ class OdinModel(nn.Module):
         dec_len = label_len + 1  # + BOS
         dec_mask = torch.arange(decoder_input.shape[1], device=device) < dec_len.unsqueeze(1)
 
+        ce = torch.zeros((), device=mu.device)
+        for i in range(s):
+            z_rep = (mu + std * eps[i]).repeat_interleave(k_out, dim=0)  # (NK, d)
+            logits = self._decode_logits(z_rep, decoder_input, dec_mask)
+            ce = ce + F.cross_entropy(logits.reshape(-1, self.vocab_size), labels.reshape(-1), ignore_index=-100)
+        ce = ce / s
+        kl = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
+        loss = ce + self.config.kl_weight * kl
+        return {"loss": loss, "ce": ce, "kl": kl}
+
+    def _decode_logits(self, z_rep: torch.Tensor, decoder_input: torch.Tensor, dec_mask: torch.Tensor) -> torch.Tensor:
+        """One teacher-forced decoder pass over ``decoder_input`` conditioned on
+        the per-row latents ``z_rep`` (NK, d). Returns logits aligned with the
+        decoder-input positions that make a prediction (the z-prefix slot is
+        dropped for the modernbert family, which prepends the latent)."""
         if self.decoder_family == "modernbert":
             assert self.z_proj is not None
             embeddings = torch.cat(
                 [self.z_proj(z_rep).unsqueeze(1), self._decoder_embed_module()(decoder_input)], dim=1
             )
             position_ids = (
-                torch.arange(embeddings.shape[1], device=device).unsqueeze(0).expand(decoder_input.shape[0], -1)
+                torch.arange(embeddings.shape[1], device=embeddings.device)
+                .unsqueeze(0)
+                .expand(decoder_input.shape[0], -1)
             )
-            logits = self.lm_head(self.decoder(inputs_embeds=embeddings, position_ids=position_ids).last_hidden_state)[
+            return self.lm_head(self.decoder(inputs_embeds=embeddings, position_ids=position_ids).last_hidden_state)[
                 :, 1:
             ]
-        else:
-            memory = z_rep.unsqueeze(1)
-            memory_mask = torch.ones(memory.shape[0], 1, dtype=torch.long, device=device)
-            logits = self.lm_head(
-                self.decoder(
-                    input_ids=decoder_input,
-                    attention_mask=dec_mask,
-                    encoder_hidden_states=memory,
-                    encoder_attention_mask=memory_mask,
-                ).last_hidden_state
-            )
-
-        ce = F.cross_entropy(logits.reshape(-1, self.vocab_size), labels.reshape(-1), ignore_index=-100)
-        kl = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
-        loss = ce + self.config.kl_weight * kl
-        return {"loss": loss, "ce": ce, "kl": kl}
+        memory = z_rep.unsqueeze(1)
+        memory_mask = torch.ones(memory.shape[0], 1, dtype=torch.long, device=memory.device)
+        return self.lm_head(
+            self.decoder(
+                input_ids=decoder_input,
+                attention_mask=dec_mask,
+                encoder_hidden_states=memory,
+                encoder_attention_mask=memory_mask,
+            ).last_hidden_state
+        )
 
     # ------------------------------------------------------------------ #
     # Inference

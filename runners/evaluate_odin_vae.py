@@ -253,6 +253,7 @@ def main(argv: list[str] | None = None) -> None:
         tokenizer,
         augmenter,
         k_input=aug_cfg.k_input,
+        k_input_weights=aug_cfg.k_input_weights,
         k_latin_target=aug_cfg.k_latin_target,
         k_non_latin_target=aug_cfg.k_non_latin_target,
         max_tokens=aug_cfg.max_surface_tokens,

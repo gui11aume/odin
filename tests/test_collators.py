@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from odin_vae.augment import LATIN_SCRIPT, SCRIPTS, LetterAugmenter
@@ -120,6 +121,26 @@ def test_input_count_drawn_uniformly() -> None:
 
     counts = Counter(ks)
     assert all(25 <= c <= 75 for c in counts.values())
+
+
+def test_k_input_weights_respected() -> None:
+    weights = [0.5, 0.25, 0.125, 0.125]
+    collator = make_collator(k_input=4, k_input_weights=weights)
+    ks = []
+    for i in range(4000):
+        batch = collator([rich_cluster(f"c{i}")])
+        ks.append(int(batch["k_per_cluster"][0]))
+    from collections import Counter
+
+    counts = Counter(ks)
+    for k, w in zip(range(1, 5), weights):
+        frac = counts.get(k, 0) / len(ks)
+        assert abs(frac - w) < 0.05, f"k={k}: {frac:.3f} not within 0.05 of {w}"
+
+
+def test_k_input_weights_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError, match="k_input_weights"):
+        make_collator(k_input=4, k_input_weights=[0.5, 0.5])
 
 
 def test_target_priming_is_coin_flip() -> None:

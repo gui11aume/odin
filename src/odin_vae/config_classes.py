@@ -74,11 +74,26 @@ class ConfigForAugmentation(pydantic.BaseModel):
         default=0.7, ge=0.0, le=1.0, description="P(substitution drawn from the visual-confusion class)."
     )
     k_input: int = pydantic.Field(
-        default=4, ge=1, description="Max input cells per cluster; k is drawn uniformly from 1..k_input."
+        default=4, ge=1, description="Max input cells per cluster; k is drawn from 1..k_input."
     )
+    # Sampling weights for k = 1..k_input (same order); None = uniform.
+    # Geometric decay (e.g. [0.5, 0.25, 0.125, 0.125]) over-weights the
+    # single-surface, low-information regime that production sees most.
+    k_input_weights: list[float] | None = pydantic.Field(default=None)
     k_latin_target: int = pydantic.Field(default=4, ge=0)
     k_non_latin_target: int = pydantic.Field(default=2, ge=0)
     max_surface_tokens: int = pydantic.Field(default=128, ge=2)
+
+    @pydantic.model_validator(mode="after")
+    def _check_k_weights(self) -> "ConfigForAugmentation":
+        if self.k_input_weights is not None:
+            if len(self.k_input_weights) != self.k_input:
+                raise ValueError(
+                    f"k_input_weights has {len(self.k_input_weights)} entries but k_input is {self.k_input}."
+                )
+            if any(w <= 0 for w in self.k_input_weights):
+                raise ValueError("k_input_weights entries must be > 0.")
+        return self
 
 
 class ConfigForModel(pydantic.BaseModel):
@@ -96,6 +111,11 @@ class ConfigForModel(pydantic.BaseModel):
     max_position_embeddings: int = pydantic.Field(default=64, ge=2)
     decoder: Literal["modernbert", "t5"] = pydantic.Field(default="modernbert")
     kl_weight: float = pydantic.Field(default=1e-3, ge=0.0)
+    # Multi-sample ELBO: number of reparameterized latents decoded per
+    # cluster per step (CE averaged over the samples). 1 = classic VAE
+    # estimator; >1 lowers the reconstruction gradient variance so the
+    # learned posterior variance reflects expected decode quality.
+    num_latent_samples: int = pydantic.Field(default=1, ge=1)
 
     @pydantic.model_validator(mode="after")
     def _check_heads(self) -> "ConfigForModel":

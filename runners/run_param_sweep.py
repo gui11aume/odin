@@ -100,7 +100,8 @@ def build_combo_config(base: dict, combo: dict[str, float], *, tag: str, epochs:
         training["optimizer_kwargs"]["weight_decay"] = combo["wd"]
     if "kl" in combo:
         cfg["model"]["kl_weight"] = combo["kl"]
-    training["enable_checkpointing"] = False
+    # Keep the epoch-end checkpoint: combo readouts (demo, selectivity) load it.
+    training["enable_checkpointing"] = True
     training["devices"] = 1
     training["strategy"] = "auto"
     training["log_name"] = f"{tag}_{combo_slug(combo)}"

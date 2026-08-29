@@ -13,7 +13,7 @@ TAGS = list(range(3, 15))  # 12 tag ids
 PAD, BOS, EOS = 0, 2, 1
 
 
-def make_model(decoder: str = "modernbert", device: str = "cpu") -> OdinModel:
+def make_model(decoder: str = "modernbert", device: str = "cpu", num_latent_samples: int = 1) -> OdinModel:
     config = ConfigForModel(
         tokenizer_path="unused",
         hidden_size=32,
@@ -25,6 +25,7 @@ def make_model(decoder: str = "modernbert", device: str = "cpu") -> OdinModel:
         max_position_embeddings=32,
         decoder=decoder,
         kl_weight=1e-3,
+        num_latent_samples=num_latent_samples,
     )
     model = OdinModel(config, vocab_size=VOCAB, pad_token_id=PAD, bos_token_id=BOS, eos_token_id=EOS)
     return model.to(device)
@@ -298,6 +299,32 @@ def test_log_prob_matches_forward_ce(decoder: str, primed: bool) -> None:
     assert out["ce"].item() == pytest.approx(-sum(per) / len(per), abs=1e-4)
     # The primed prediction includes the tag token; both end in the EOS term.
     assert len(per) == n + 1 + (1 if primed else 0)
+
+
+@pytest.mark.parametrize("decoder", ["modernbert", "t5"])
+def test_forward_multi_sample_frozen_variance_matches_single(decoder: str) -> None:
+    """With std ~ 0 every latent draw is mu, so S-sample CE equals 1-sample CE."""
+    model = make_model(decoder, num_latent_samples=4).eval()
+    _freeze_variance(model)
+    torch.manual_seed(7)
+    batch = make_batch()
+    out4 = model(**batch)
+    model.config.num_latent_samples = 1
+    out1 = model(**batch)
+    assert out4["ce"].item() == pytest.approx(out1["ce"].item(), abs=1e-5)
+    assert out4["kl"].item() == pytest.approx(out1["kl"].item(), abs=1e-6)
+
+
+@pytest.mark.parametrize("decoder", ["modernbert", "t5"])
+def test_forward_multi_sample_finite_and_backward(decoder: str) -> None:
+    model = make_model(decoder, num_latent_samples=4)
+    out = model(**make_batch())
+    assert torch.isfinite(out["loss"])
+    assert torch.isfinite(out["ce"])
+    out["loss"].backward()
+    assert model.pool_query.grad is not None
+    assert model.mu_head.weight.grad is not None
+    assert model.logvar_head.weight.grad is not None
 
 
 @pytest.fixture()
