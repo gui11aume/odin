@@ -6,10 +6,13 @@ runners/generate_companies_phase_1.py) use the same 12 tags and the same
 trains on both. This runner produces:
 
 * the merged train pool (inventor lines in original order, then company
-  lines in original order), and
+  lines in original order),
 * the new val corpus: the previous val lines verbatim (byte-identical, so
   val stays comparable to the pre-merge runs) followed by a fixed-seed
-  holdout of company lines.
+  holdout of company lines, and optionally
+* a test corpus: a fixed-seed carve-out of inventor and company lines,
+  disjoint from both the pool and val (never trained on, never used for
+  selection).
 
 Rules applied:
 
@@ -19,12 +22,16 @@ Rules applied:
   the model a name cut off mid-word;
 * lines from ``--old-val`` are excluded from the pool (they are val, not
   train), and the company holdout is excluded as well;
+* test lines are drawn only from lines that would otherwise enter the pool
+  (never from val, and with a different seed), so all three sets are
+  disjoint by construction;
 * ordering and line content are otherwise preserved.
 
 Usage:
     python runners/merge_odin_trainset.py INVENTOR COMPANIES \
         --old-val OLD_VAL.txt.gz -o POOL.txt.gz --val-out VAL.txt.gz \
-        [--holdout 2000] [--seed 123] [--max-tokens 48]
+        [--holdout 2000] [--seed 123] [--max-tokens 48] \
+        [--test-out TEST.txt.gz --test-inv 2000 --test-comp 1000 --test-seed 456]
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ import io
 import logging
 import random
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 from transformers import AutoTokenizer
@@ -108,6 +116,10 @@ def merge(
     seed: int,
     tokenizer,
     max_tokens: int,
+    test_out: Path | None = None,
+    test_inv: int = 0,
+    test_comp: int = 0,
+    test_seed: int = 456,
 ) -> dict:
     val_lines: list[str] = []
     seen_val: set[str] = set()
@@ -139,7 +151,18 @@ def merge(
             company_dead += 1
         pruned.append(cells if cells and any(tag == "la" for tag, _ in cells) else None)
 
+    # Test carve-out: drawn only from the company lines that would otherwise
+    # enter the pool, so it is disjoint from the val holdout by construction.
+    comp_test_set: set[int] = set()
+    if test_out is not None and test_comp > 0:
+        pool_idx = [i for i, cells in enumerate(pruned) if cells is not None and i not in holdout_idx]
+        comp_test_set = {
+            pool_idx[j] for j in random.Random(test_seed).sample(range(len(pool_idx)), min(test_comp, len(pool_idx)))
+        }
+        log.info("company test carve-out: %d (seed %d)", len(comp_test_set), test_seed)
+
     val_holdout: list[str] = []
+    test_companies: list[str] = []
     pool_companies: list[str] = []
     for i, cells in enumerate(pruned):
         if cells is None:
@@ -147,13 +170,16 @@ def merge(
         text = format_cells(cells)
         if i in holdout_idx:
             val_holdout.append(text)
+        elif i in comp_test_set:
+            test_companies.append(text)
         else:
             pool_companies.append(text)
     log.info(
-        "company pruned cells: %d, dead lines dropped (no la left): %d, holdout lines: %d",
+        "company pruned cells: %d, dead lines dropped (no la left): %d, holdout lines: %d, test lines: %d",
         company_dropped,
         company_dead,
         len(val_holdout),
+        len(test_companies),
     )
 
     # --- New val corpus: old val verbatim, then the company holdout ---
@@ -163,12 +189,26 @@ def merge(
         for text in val_holdout:
             print(text, file=val_fh)
 
-    # --- Stream the inventor set: skip old-val lines, prune cells, write pool ---
+    # --- Inventor test carve-out (needs the eligible line count first) ---
+    inv_test_set: set[int] = set()
+    if test_out is not None and test_inv > 0:
+        n_eligible = 0
+        for line in iter_lines(inventor):
+            if line.rstrip("\r\n") not in seen_val:
+                n_eligible += 1
+        inv_test_set = set(random.Random(test_seed).sample(range(n_eligible), min(test_inv, n_eligible)))
+        log.info("inventor test carve-out: %d of %d eligible lines (seed %d)", len(inv_test_set), n_eligible, test_seed)
+
+    # --- Stream the inventor set: skip old-val lines, prune cells, write pool/test ---
     inventor_dropped = 0
     inventor_kept = 0
+    inventor_to_test = 0
     inventor_skipped_val = 0
     inventor_dead = 0
-    with open_out_gz(pool_out) as pool_fh:
+    with ExitStack() as stack:
+        pool_fh = stack.enter_context(open_out_gz(pool_out))
+        test_fh = stack.enter_context(open_out_gz(test_out)) if test_out is not None else None
+        elig = 0
         for line in iter_lines(inventor):
             text = line.rstrip("\r\n")
             if text in seen_val:
@@ -182,9 +222,19 @@ def merge(
             if not cells or not any(tag == "la" for tag, _ in cells):
                 inventor_dead += 1
                 log.warning("Dropped inventor line left without an la cell after pruning: %r", text[:120])
+                elig += 1
                 continue
-            print(format_cells(cells), file=pool_fh)
-            inventor_kept += 1
+            out_text = format_cells(cells)
+            if test_fh is not None and elig in inv_test_set:
+                print(out_text, file=test_fh)
+                inventor_to_test += 1
+            else:
+                print(out_text, file=pool_fh)
+                inventor_kept += 1
+            elig += 1
+        if test_fh is not None:
+            for text in test_companies:
+                print(text, file=test_fh)
         for text in pool_companies:
             print(text, file=pool_fh)
 
@@ -201,6 +251,9 @@ def merge(
         "inventor_to_pool": inventor_kept,
         "pool_total": inventor_kept + len(pool_companies),
         "val_total": len(val_lines) + len(val_holdout),
+        "test_inventor": inventor_to_test,
+        "test_company": len(test_companies),
+        "test_total": inventor_to_test + len(test_companies),
     }
 
 
@@ -214,6 +267,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--val-out", required=True, help="Output new val corpus: old val + company holdout (.txt.gz).")
     parser.add_argument("--holdout", type=int, default=2000, help="Company lines held out into val (default 2000).")
     parser.add_argument("--seed", type=int, default=123, help="Holdout selection seed (default 123).")
+    parser.add_argument(
+        "--test-out", default=None, help="Output test corpus (.txt.gz); also enables the test carve-out."
+    )
+    parser.add_argument(
+        "--test-inv", type=int, default=2000, help="Inventor lines carved out into test (default 2000)."
+    )
+    parser.add_argument(
+        "--test-comp", type=int, default=1000, help="Company lines carved out into test (default 1000)."
+    )
+    parser.add_argument(
+        "--test-seed", type=int, default=456, help="Test selection seed, distinct from --seed (default 456)."
+    )
     parser.add_argument("--tokenizer", default="/mnt/nvme1/odin_tokenizer", help="Byte-BPE tokenizer directory.")
     parser.add_argument("--max-tokens", type=int, default=48, help="Collator max_surface_tokens (default 48).")
     args = parser.parse_args(argv)
@@ -233,6 +298,10 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         tokenizer=tokenizer,
         max_tokens=args.max_tokens,
+        test_out=Path(args.test_out) if args.test_out else None,
+        test_inv=args.test_inv,
+        test_comp=args.test_comp,
+        test_seed=args.test_seed,
     )
     for key, value in stats.items():
         log.info("%-24s %s", key, value)

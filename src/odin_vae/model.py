@@ -465,3 +465,75 @@ class OdinModel(nn.Module):
         finally:
             if was_training:
                 self.train()
+
+    def sample_generate(
+        self,
+        surf_ids: torch.Tensor,
+        surf_mask: torch.Tensor,
+        *,
+        k_per_cluster: torch.Tensor | None = None,
+        k: int | None = None,
+        tag_id: int | None = None,
+        n_samples: int = 1,
+        max_new_tokens: int = 32,
+        temperature: float = 0.0,
+        top_p: float | None = None,
+        generator: torch.Generator | None = None,
+    ) -> tuple[list[list[int]], torch.Tensor, torch.Tensor]:
+        """Sample ``n_samples`` decodes from the posterior ``q(z | cluster)``.
+
+        The cluster is encoded once into ``(mu, logvar)``; each sample draws a
+        latent with the reparameterization ``z = mu + exp(0.5 logvar) * eps``
+        and decodes it with :meth:`generate`. This is the diversity path the
+        deterministic ``mu``-based :meth:`log_prob`/:meth:`generate` do not
+        cover: a low-information cluster (e.g. an abbreviated name) should
+        carry a high ``logvar`` and yield many distinct decodes, while a
+        high-information cluster should collapse to (near-)identical ones.
+
+        Args:
+            surf_ids / surf_mask: ``(N, L)`` encoder inputs for a single
+                cluster (tag token prepended per surface), as for
+                :meth:`encode`.
+            k_per_cluster / k: cluster layout, as for :meth:`encode` (the rows
+                must form exactly one cluster).
+            tag_id: priming script tag, or ``None`` (unknown-alphabet regime).
+            n_samples: number of decodes (>= 1).
+            max_new_tokens / temperature / top_p / generator: passed to
+                :meth:`generate` for every sample (one generator is shared by
+                the latent draws and all token draws, in order).
+
+        Returns:
+            ``(samples, mu, logvar)`` — ``samples`` is a list of
+            ``n_samples`` token-id lists (no BOS/tag), and ``mu``/``logvar``
+            are ``(1, d)`` so the caller can inspect the posterior.
+        """
+        if n_samples < 1:
+            raise ValueError("n_samples must be >= 1.")
+        was_training = self.training
+        if was_training:
+            self.eval()
+        try:
+            with torch.no_grad():
+                mu, logvar = self.encode(surf_ids, surf_mask, k_per_cluster=k_per_cluster, k=k)
+                if mu.shape[0] != 1:
+                    raise ValueError("sample_generate decodes one cluster at a time.")
+                device = next(self.parameters()).device
+                mu = mu.to(device)
+                logvar = logvar.to(device)
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn((n_samples, mu.shape[1]), device=device, generator=generator)
+                samples = [
+                    self.generate(
+                        mu + std * eps[i],
+                        tag_id,
+                        max_new_tokens=max_new_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        generator=generator,
+                    )
+                    for i in range(n_samples)
+                ]
+                return samples, mu, logvar
+        finally:
+            if was_training:
+                self.train()

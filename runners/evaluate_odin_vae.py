@@ -77,22 +77,37 @@ def load_model(root_cfg: ConfigForRoot, tokenizer, checkpoint: Path) -> OdinMode
     return model
 
 
-def encode_inputs(model: OdinModel, tokenizer, tags: list[str], cells: list[str]) -> torch.Tensor:
-    """Encode a cluster's surfaces (clean) into its mu vector (harness protocol)."""
+def cluster_inputs(
+    model: OdinModel, tokenizer, tags: list[str], cells: list[str]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build encoder inputs for one cluster (harness protocol: tag prefix, 12-surface
+    cap, 63-token cap, right padding). Returns ``(surf_ids, surf_mask, k_per_cluster)``."""
     rows = list(zip(tags, cells))[:12]
     ids = [tokenizer.encode(text, add_special_tokens=False)[:63] for _, text in rows]
     ids = [[tokenizer.convert_tokens_to_ids(f"{_TAG_PREFIX}{tag}]")] + row for tag, row in zip(tags, ids)]
     length = max(len(row) for row in ids)
-    device = next(model.parameters()).device
     surf_ids = torch.full((len(ids), length), model.pad_token_id, dtype=torch.long)
     surf_mask = torch.zeros((len(ids), length), dtype=torch.long)
     for i, row in enumerate(ids):
         surf_ids[i, : len(row)] = torch.tensor(row, dtype=torch.long)
         surf_mask[i, : len(row)] = 1
     k_per_cluster = torch.full((1,), len(ids), dtype=torch.long)
+    return surf_ids, surf_mask, k_per_cluster
+
+
+def encode_cluster(model: OdinModel, tokenizer, tags: list[str], cells: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode a cluster's surfaces (clean) into its ``(mu, logvar)`` (harness protocol)."""
+    surf_ids, surf_mask, k_per_cluster = cluster_inputs(model, tokenizer, tags, cells)
+    device = next(model.parameters()).device
     with torch.no_grad():
-        mu, _ = model.encode(surf_ids.to(device), surf_mask.to(device), k_per_cluster=k_per_cluster)
-    return mu[0]
+        mu, logvar = model.encode(surf_ids.to(device), surf_mask.to(device), k_per_cluster=k_per_cluster)
+    return mu[0], logvar[0]
+
+
+def encode_inputs(model: OdinModel, tokenizer, tags: list[str], cells: list[str]) -> torch.Tensor:
+    """Encode a cluster's surfaces (clean) into its mu vector (harness protocol)."""
+    mu, _ = encode_cluster(model, tokenizer, tags, cells)
+    return mu
 
 
 def run_val_loss(

@@ -298,3 +298,64 @@ def test_log_prob_matches_forward_ce(decoder: str, primed: bool) -> None:
     assert out["ce"].item() == pytest.approx(-sum(per) / len(per), abs=1e-4)
     # The primed prediction includes the tag token; both end in the EOS term.
     assert len(per) == n + 1 + (1 if primed else 0)
+
+
+@pytest.fixture()
+def cluster_inputs() -> tuple[torch.Tensor, torch.Tensor]:
+    torch.manual_seed(3)
+    ids = torch.randint(3, VOCAB, (3, 6))
+    mask = torch.ones(3, 6, dtype=torch.long)
+    mask[0, -1:] = 0
+    mask[2, -2:] = 0
+    return ids, mask
+
+
+@pytest.mark.parametrize("decoder", ["modernbert", "t5"])
+def test_sample_generate_shapes_and_seed_determinism(
+    decoder: str, cluster_inputs: tuple[torch.Tensor, torch.Tensor]
+) -> None:
+    model = make_model(decoder).eval()
+    ids, mask = cluster_inputs
+    g1 = torch.Generator().manual_seed(42)
+    g2 = torch.Generator().manual_seed(42)
+    s1, mu, logvar = model.sample_generate(
+        ids, mask, k=3, tag_id=TAGS[0], n_samples=4, max_new_tokens=6, temperature=1.0, generator=g1
+    )
+    s2, mu2, logvar2 = model.sample_generate(
+        ids, mask, k=3, tag_id=TAGS[0], n_samples=4, max_new_tokens=6, temperature=1.0, generator=g2
+    )
+    assert len(s1) == 4
+    for sample in s1:
+        assert len(sample) <= 6
+        assert all(PAD <= t < VOCAB for t in sample)
+    assert mu.shape == (1, model.config.hidden_size)
+    assert logvar.shape == (1, model.config.hidden_size)
+    assert torch.isfinite(mu).all() and torch.isfinite(logvar).all()
+    # Same seed -> same latent draws -> same decodes (incl. token sampling).
+    assert s1 == s2
+    assert torch.equal(mu, mu2) and torch.equal(logvar, logvar2)
+    # The posterior equals a direct encode of the same cluster.
+    with torch.no_grad():
+        ref_mu, ref_logvar = model.encode(ids, mask, k=3)
+    assert torch.equal(mu, ref_mu) and torch.equal(logvar, ref_logvar)
+
+
+def test_sample_generate_frozen_variance_collapses_to_mu(cluster_inputs: tuple[torch.Tensor, torch.Tensor]) -> None:
+    """With std ~ 0 every sample is z == mu, hence all decodes are identical."""
+    model = make_model().eval()
+    _freeze_variance(model)
+    ids, mask = cluster_inputs
+    s, mu, _ = model.sample_generate(ids, mask, k=3, tag_id=TAGS[1], n_samples=5, max_new_tokens=6)
+    assert len(set(map(tuple, s))) == 1
+    # All samples are z == mu, i.e. the plain mu decode.
+    assert s[0] == model.generate(mu[0], TAGS[1], max_new_tokens=6)
+
+
+def test_sample_generate_validation(cluster_inputs: tuple[torch.Tensor, torch.Tensor]) -> None:
+    model = make_model()
+    ids, mask = cluster_inputs
+    with pytest.raises(ValueError, match="n_samples"):
+        model.sample_generate(ids, mask, k=3, n_samples=0)
+    # k=1 over 3 rows is three clusters; sampling decodes one cluster at a time.
+    with pytest.raises(ValueError, match="one cluster"):
+        model.sample_generate(ids, mask, k=1, n_samples=1)

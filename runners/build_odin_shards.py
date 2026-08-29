@@ -105,14 +105,21 @@ def val_index_set(total: int, val_size: int) -> set[int]:
 
 
 def phase_a(
-    input_path: Path, work_dir: Path, shard_size: int, val_size: int, limit: int = 0, val_input: Path | None = None
+    input_path: Path,
+    work_dir: Path,
+    shard_size: int,
+    val_size: int,
+    limit: int = 0,
+    val_input: Path | None = None,
+    test_input: Path | None = None,
 ) -> dict:
-    """Count, split train/val, write the flat files, offsets, and letter frequencies.
+    """Count, split train/val(/test), write the flat files, offsets, and letter frequencies.
 
     With ``val_input`` given, those lines are the val set verbatim (file order,
     deduped) and the stratified selection is skipped; any val line that also
     appears in the input is skipped there (leakage guard). Otherwise val is
-    drawn from the input by the deterministic stratified scheme.
+    drawn from the input by the deterministic stratified scheme. ``test_input``,
+    if given, is the test set verbatim and is skipped in the input as well.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     flat_path = work_dir / "flat_train.txt"
@@ -144,9 +151,28 @@ def phase_a(
         n_val = min(val_size, total // 2)
         n_train = total - n_val
         val_indices = val_index_set(total, n_val)
+
+    test_lines: list[str] = []
+    test_set: set[str] = set()
+    if test_input is not None:
+        for line in iter_lines(test_input):
+            text = line.rstrip("\r\n")
+            if text and text not in test_set:
+                test_set.add(text)
+                test_lines.append(text)
+        log.info("Phase A: %d explicit test lines from %s", len(test_lines), test_input)
+        with open(work_dir / "flat_test.txt", "wb") as test:
+            for text in test_lines:
+                test.write((text + "\n").encode("utf-8"))
     n_shards = (n_train + shard_size - 1) // shard_size
 
-    log.info("Phase A.2: writing flat files (n_train=%d, n_val=%d, n_shards=%d) ...", n_train, n_val, n_shards)
+    log.info(
+        "Phase A.2: writing flat files (n_train=%d, n_val=%d, n_test=%d, n_shards=%d) ...",
+        n_train,
+        n_val,
+        len(test_lines),
+        n_shards,
+    )
     t0 = time.time()
     freq: Counter = Counter()
     malformed = 0
@@ -154,6 +180,7 @@ def phase_a(
     train_line_idx = 0
     val_line_idx = 0
     val_overlap = 0
+    test_overlap = 0
     # The val file is written from the stream only for the stratified split; for an
     # explicit --val-input it was already written above and must not be
     # re-opened (that would truncate it), so a throwaway sink is used.
@@ -179,6 +206,9 @@ def phase_a(
             if val_set and line.rstrip("\n") in val_set:
                 val_overlap += 1
                 continue  # val line present in the train input: never train on it
+            if test_set and line.rstrip("\n") in test_set:
+                test_overlap += 1
+                continue  # test line present in the train input: never train on it
             if train_line_idx % shard_size == 0:
                 offsets.append(flat.tell())
             flat.write(data.encode("utf-8"))
@@ -212,13 +242,17 @@ def phase_a(
 
     if val_overlap:
         log.warning("Phase A: %d val lines also appeared in the train input and were skipped.", val_overlap)
+    if test_overlap:
+        log.warning("Phase A: %d test lines also appeared in the train input and were skipped.", test_overlap)
     stats = {
         "total": total,
         "n_train": n_train,
         "n_val": val_line_idx if val_indices is not None else n_val,
+        "n_test": len(test_lines),
         "n_shards": n_shards,
         "malformed": malformed,
         "val_overlap": val_overlap,
+        "test_overlap": test_overlap,
         "phase_a_seconds": round(time.time() - t0, 1),
     }
     log.info("Phase A done: %s (%.1fs)", stats, stats["phase_a_seconds"])
@@ -272,8 +306,8 @@ def build_shard_range(
     return results
 
 
-def build_val_shards(val_path: Path, out_dir: Path, shard_size: int) -> list[dict]:
-    """Write the (small) val shards. Run in the main process."""
+def build_val_shards(val_path: Path, out_dir: Path, shard_size: int, key_prefix: str = "val-") -> list[dict]:
+    """Write the (small) val/test shards. Run in the main process."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     lines = [ln for ln in val_path.read_text(encoding="utf-8").splitlines() if ln]
@@ -286,17 +320,21 @@ def build_val_shards(val_path: Path, out_dir: Path, shard_size: int) -> list[dic
             for j, line in enumerate(chunk):
                 parsed = parse_line(line)
                 if parsed is None:
-                    raise RuntimeError(f"Malformed val line at offset {s + j} (input should be clean).")
+                    raise RuntimeError(
+                        f"Malformed {key_prefix.rstrip('-')} line at offset {s + j} (input should be clean)."
+                    )
                 tags, cells = parsed
-                # Namespaced key: val indices restart at 0 and must not collide with train keys.
-                sink.write({"__key__": f"val-{s + j:09d}", "json": record_json(tags, cells)})
+                # Namespaced key: indices restart at 0 and must not collide with train keys.
+                sink.write({"__key__": f"{key_prefix}{s + j:09d}", "json": record_json(tags, cells)})
         finally:
             sink.close()
         results.append({"shard": name, "n_clusters": len(chunk)})
     return results
 
 
-def phase_b(work_dir: Path, train_dir: Path, val_dir: Path, shard_size: int, workers: int, stats: dict) -> dict:
+def phase_b(
+    work_dir: Path, train_dir: Path, val_dir: Path, test_dir: Path, shard_size: int, workers: int, stats: dict
+) -> dict:
     offsets = json.loads((work_dir / "offsets.json").read_text(encoding="utf-8"))
     n_shards = len(offsets) - 1
     n_train = stats["n_train"]
@@ -326,8 +364,13 @@ def phase_b(work_dir: Path, train_dir: Path, val_dir: Path, shard_size: int, wor
         for future in futures:
             train_results += future.result()
     val_results = build_val_shards(work_dir / "flat_val.txt", val_dir, shard_size)
+    test_results = (
+        build_val_shards(work_dir / "flat_test.txt", test_dir, shard_size, key_prefix="test-")
+        if (work_dir / "flat_test.txt").exists()
+        else []
+    )
     stats["phase_b_seconds"] = round(time.time() - t0, 1)
-    return {"train": train_results, "val": val_results}
+    return {"train": train_results, "val": val_results, "test": test_results}
 
 
 # --------------------------------------------------------------------------- #
@@ -346,56 +389,83 @@ def main(argv: list[str] | None = None) -> None:
         help="Explicit val corpus (.txt/.txt.gz): used verbatim as the val set (file order), "
         "and its lines are skipped in the train input; the stratified --val-size selection is skipped.",
     )
+    parser.add_argument(
+        "--test-input",
+        default=None,
+        help="Explicit test corpus (.txt/.txt.gz): used verbatim as the test set (file order), "
+        "and its lines are skipped in the train input.",
+    )
     args = parser.parse_args(argv)
 
     input_path = Path(args.input)
     output_root = Path(args.output)
     if not input_path.is_file():
-        raise SystemExit(f"Input not found: {input_path}")
+        raise SystemExit(f"Input not found: {args.input}")
     train_dir = output_root / "train"
     val_dir = output_root / "val"
+    test_dir = output_root / "test"
     work_dir = output_root / "work"
-    for d in (train_dir, val_dir, work_dir):
+    for d in (train_dir, val_dir, test_dir, work_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     val_input_path = None
     if args.val_input is not None:
         val_input_path = Path(args.val_input)
         if not val_input_path.is_file():
-            raise SystemExit(f"Val input not found: {val_input_path}")
+            raise SystemExit(f"Val input not found: {args.val_input}")
         if args.val_size != 4000:
             log.warning("--val-input given: --val-size %d is ignored (explicit val lines win).", args.val_size)
+    test_input_path = None
+    if args.test_input is not None:
+        test_input_path = Path(args.test_input)
+        if not test_input_path.is_file():
+            raise SystemExit(f"Test input not found: {args.test_input}")
 
     t_start = time.time()
-    stats = phase_a(input_path, work_dir, args.shard_size, args.val_size, args.limit, val_input=val_input_path)
-    shard_results = phase_b(work_dir, train_dir, val_dir, args.shard_size, args.workers, stats)
+    stats = phase_a(
+        input_path,
+        work_dir,
+        args.shard_size,
+        args.val_size,
+        args.limit,
+        val_input=val_input_path,
+        test_input=test_input_path,
+    )
+    shard_results = phase_b(work_dir, train_dir, val_dir, test_dir, args.shard_size, args.workers, stats)
 
     n_train_shards = len(shard_results["train"])
     n_val_shards = len(shard_results["val"])
+    n_test_shards = len(shard_results["test"])
     manifest = {
         "input": str(input_path),
         "val_input": str(val_input_path) if val_input_path else None,
+        "test_input": str(test_input_path) if test_input_path else None,
         "shard_size": args.shard_size,
         "n_total": stats["total"],
         "n_train": stats["n_train"],
         "n_val": stats["n_val"],
+        "n_test": stats["n_test"],
         "n_train_shards": n_train_shards,
         "n_val_shards": n_val_shards,
+        "n_test_shards": n_test_shards,
         "workers": args.workers,
         "total_seconds": round(time.time() - t_start, 1),
         "train_pattern": f"train/shard-{{000000..{n_train_shards - 1:06d}}}.tar.gz" if n_train_shards else None,
         "val_pattern": f"val/shard-{{000000..{n_val_shards - 1:06d}}}.tar.gz" if n_val_shards else None,
+        "test_pattern": f"test/shard-{{000000..{n_test_shards - 1:06d}}}.tar.gz" if n_test_shards else None,
     }
     with open(output_root / "manifest.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
     log.info("Build complete in %.1fs:", manifest["total_seconds"])
     log.info("  train: %d clusters in %d shards  (%s)", manifest["n_train"], n_train_shards, manifest["train_pattern"])
     log.info("  val:   %d clusters in %d shards  (%s)", manifest["n_val"], n_val_shards, manifest["val_pattern"])
+    log.info("  test:  %d clusters in %d shards  (%s)", manifest["n_test"], n_test_shards, manifest["test_pattern"])
     log.info("  output root: %s", output_root)
     # Promote the letter-frequency table, remove the large intermediates.
     shutil.copyfile(work_dir / "char_frequencies.json", output_root / "char_frequencies.json")
     (work_dir / "flat_train.txt").unlink(missing_ok=True)
     (work_dir / "flat_val.txt").unlink(missing_ok=True)
+    (work_dir / "flat_test.txt").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
