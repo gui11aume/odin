@@ -13,6 +13,7 @@ class FakeTokenizer:
 
     def __init__(self, pad_token_id: int = 0):
         self.pad_token_id = pad_token_id
+        self.eos_token_id = 7
         self._tag_ids = {f"[{tag}]": 1000 + i for i, tag in enumerate(SCRIPTS)}
         self._char_ids: dict[str, int] = {}
         self._char_by_id: dict[int, str] = {}
@@ -93,6 +94,18 @@ def test_batch_shapes() -> None:
     # The tag token is prepended to every input row (tag ids start at 1000).
     assert (batch["surf_ids"][:, 0] >= 1000).all()
     assert (batch["surf_mask"][:, 0] == 1).all()
+
+
+def test_targets_end_with_eos() -> None:
+    """Every target row is the surface tokens plus a trailing, masked EOS."""
+    collator = make_collator(k_input=4, k_latin_target=2, k_non_latin_target=1)
+    batch = collator([rich_cluster("c0")])
+    eos = 7
+    for row in range(batch["target_ids"].shape[0]):
+        n_real = int(batch["target_mask"][row].sum())
+        assert n_real >= 2  # at least one surface token + EOS
+        assert int(batch["target_ids"][row, n_real - 1]) == eos
+        assert int(batch["target_mask"][row, n_real - 1]) == 1
 
 
 def test_input_count_drawn_uniformly() -> None:

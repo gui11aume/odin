@@ -278,38 +278,54 @@ class OdinModel(nn.Module):
     # ------------------------------------------------------------------ #
     # Inference
     # ------------------------------------------------------------------ #
-    def log_prob(self, z: torch.Tensor, tag_id: int | None, token_ids: list[int]) -> tuple[float, list[float]]:
+    def log_prob(
+        self,
+        z: torch.Tensor,
+        tag_id: int | None,
+        token_ids: list[int],
+        *,
+        include_eos: bool = True,
+    ) -> tuple[float, list[float]]:
         """Deterministic log-probability of one surface under the latent ``z``.
 
         The inference-time counterpart of ``forward`` without reparameterization
         noise (``z`` is used as-is, i.e. ``mu``) and without a batch: the surface
         is teacher-forced in a single decoder pass.
 
-        Primed (``tag_id`` given): decoder input ``[BOS, tag, t0, ..., t_{n-2}]``,
-        predicting ``[tag, t0, ..., t_{n-1}]`` — the known-alphabet regime.
-        Unprimed (``tag_id=None``): decoder input ``[BOS, t0, ..., t_{n-2}]``,
-        predicting ``[t0, ..., t_{n-1}]`` — the unknown-alphabet regime, where
-        the first predicted token is the script itself.
+        Primed (``tag_id`` given): decoder input ``[BOS, tag, ...]`` — the
+        known-alphabet regime. Unprimed (``tag_id=None``): decoder input
+        ``[BOS, ...]`` — the unknown-alphabet regime.
+
+        With ``include_eos`` (default, matching the training targets) the
+        surface is scored as a *complete* sequence: the context includes the
+        full surface and the final prediction is the stop decision (EOS).
 
         Args:
             z: Latent vector of shape ``(d,)`` or ``(1, d)`` (use ``mu``).
             tag_id: Priming script tag token id, or ``None`` for unprimed.
             token_ids: Surface token ids (no tag, no EOS).
+            include_eos: Score the trailing EOS prediction (complete sequence).
 
         Returns:
             ``(total_logprob, per_token_logprobs)`` aligned with the predicted
-            tokens (``n+1`` entries when primed, ``n`` when unprimed).
+            tokens: primed ``[tag, t0, ..., t_{n-1}(, EOS)]``, unprimed
+            ``[t0, ..., t_{n-1}(, EOS)]``.
         """
         ids = [int(t) for t in token_ids]
+        if not ids:
+            raise ValueError("token_ids must contain at least one token.")
         if tag_id is None:
             prefix = [self.bos_token_id]
-            targets = ids
+            targets = list(ids)
         else:
             prefix = [self.bos_token_id, int(tag_id)]
             targets = [int(tag_id)] + ids
-        dec_ids = prefix + ids[:-1]  # teacher-force up to the penultimate token
-        if len(targets) == 0:
-            raise ValueError("token_ids must contain at least one token.")
+        if include_eos:
+            context = ids  # the stop decision is conditioned on the full surface
+            targets = targets + [self.eos_token_id]
+        else:
+            context = ids[:-1]  # teacher-force up to the penultimate token
+        dec_ids = prefix + context
 
         was_training = self.training
         if was_training:

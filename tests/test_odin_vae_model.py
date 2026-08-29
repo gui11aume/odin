@@ -251,11 +251,15 @@ def test_log_prob_shape_finite_deterministic(decoder: str) -> None:
     ids = [5, 6, 7]
     total_p, per_p = model.log_prob(z, TAGS[0], ids)
     total_u, per_u = model.log_prob(z, None, ids)
-    # Primed predicts the tag token first, then the surface; unprimed the surface.
-    assert len(per_p) == len(ids) + 1
-    assert len(per_u) == len(ids)
+    # Default (include_eos): complete sequence. Primed predicts the tag token
+    # first, then the surface, then EOS; unprimed the surface then EOS.
+    assert len(per_p) == len(ids) + 2
+    assert len(per_u) == len(ids) + 1
     assert all(torch.isfinite(torch.tensor(v)) for v in per_p + per_u)
     assert total_p == pytest.approx(sum(per_p), abs=1e-6)
+    # Without the stop decision the predictions are the tag? + surface only.
+    assert len(model.log_prob(z, TAGS[0], ids, include_eos=False)[1]) == len(ids) + 1
+    assert len(model.log_prob(z, None, ids, include_eos=False)[1]) == len(ids)
     # Deterministic, and sensitive to the input surface.
     assert model.log_prob(z, TAGS[0], ids) == (total_p, per_p)
     assert model.log_prob(z, TAGS[0], [5, 6, 8])[0] != total_p
@@ -266,8 +270,8 @@ def test_log_prob_single_token_surface() -> None:
     z = torch.zeros(model.config.hidden_size)
     total_p, per_p = model.log_prob(z, TAGS[1], [9])
     total_u, per_u = model.log_prob(z, None, [9])
-    assert len(per_p) == 2
-    assert len(per_u) == 1
+    assert len(per_p) == 3  # tag, token, EOS
+    assert len(per_u) == 2  # token, EOS
     assert all(torch.isfinite(torch.tensor(v)) for v in per_p + per_u)
 
 
@@ -281,16 +285,16 @@ def test_log_prob_matches_forward_ce(decoder: str, primed: bool) -> None:
     torch.manual_seed(7)
     ids = [4, 11, 19, 25]
     n = len(ids)
-    l_out = n + 2  # real tokens + padding tail
+    l_out = n + 3  # surface + EOS + padding tail (the collator appends EOS)
     batch = make_batch(b=1, k_in=2, k_out=1, l_in=5, l_out=l_out, primed=primed)
-    batch["target_ids"] = torch.tensor([[*ids, PAD, PAD]], dtype=torch.long)
-    batch["target_mask"] = torch.tensor([[1] * n + [0, 0]], dtype=torch.long)
+    batch["target_ids"] = torch.tensor([[*ids, EOS, PAD]], dtype=torch.long)
+    batch["target_mask"] = torch.tensor([[1] * (n + 1) + [0]], dtype=torch.long)
     batch["target_tags"] = torch.tensor([TAGS[3]], dtype=torch.long)
     batch["target_primed"] = torch.tensor([1 if primed else 0], dtype=torch.long)
     out = model(**batch)
     mu, _ = model.encode(batch["surf_ids"], batch["surf_mask"], k_per_cluster=batch["k_per_cluster"])
     tag_id = TAGS[3] if primed else None
-    total, per = model.log_prob(mu[0], tag_id, ids)
+    total, per = model.log_prob(mu[0], tag_id, ids)  # include_eos=True, like training
     assert out["ce"].item() == pytest.approx(-sum(per) / len(per), abs=1e-4)
-    # The primed prediction includes the tag token; unprimed starts from t0.
-    assert len(per) == n + (1 if primed else 0)
+    # The primed prediction includes the tag token; both end in the EOS term.
+    assert len(per) == n + 1 + (1 if primed else 0)

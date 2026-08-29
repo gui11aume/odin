@@ -14,7 +14,8 @@ For each cluster in the batch the collator:
    log-probability computation with an unknown alphabet),
 4. corrupts the letters of the selected cells (per the LetterAugmenter; CJK
    cells are never corrupted),
-5. tokenizes (tag token prepended for inputs only) and right-pads.
+5. tokenizes (tag token prepended for inputs only), appends the EOS token to
+   every target (the decoder must learn where a surface ends), and right-pads.
 
 The per-sample RNG is seeded from the global seed, the worker id, a
 batch counter, and a hash of the cluster key: corruption and sampling are
@@ -54,6 +55,7 @@ class OdinVAECollator:
         self.max_tokens = max_tokens
         self.seed = seed
         self.pad_token_id = tokenizer.pad_token_id
+        self.eos_token_id = tokenizer.eos_token_id
         self._tag_ids = {tag: tokenizer.convert_tokens_to_ids(f"[{tag}]") for tag in SCRIPTS}
         self._batch_idx = 0
         self.n_truncated = 0
@@ -151,7 +153,7 @@ class OdinVAECollator:
         self._batch_idx += 1
 
         surf_ids = [self._tokenize(text, tag) for tag, text in surface_rows]
-        tgt_ids = [self._tokenize(text, None) for tag, text in target_rows]
+        tgt_ids = [self._tokenize(text, None) + [self.eos_token_id] for tag, text in target_rows]
         tgt_tags = [self._tag_ids[tag] for tag, _ in target_rows]
 
         def pad(rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
