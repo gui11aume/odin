@@ -128,6 +128,18 @@ class OdinVAELightningHarness(pl.LightningModule):
         )
         return cast(torch.Tensor, outputs["loss"])
 
+    def test_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:  # noqa: ARG002
+        """Same measurement as validation, logged under ``test_`` (held-out split)."""
+        outputs = self.model(**batch)
+        self.log_dict(
+            {"test_loss": outputs["loss"], "test_ce": outputs["ce"], "test_kl": outputs["kl"]},
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        return cast(torch.Tensor, outputs["loss"])
+
     # ------------------------------------------------------------------ #
     # Generation smoke check
     # ------------------------------------------------------------------ #
