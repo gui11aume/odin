@@ -52,10 +52,10 @@ augmentation:
   confusion_weight: 0.7
   # k (input surfaces per cluster) is drawn from 1..k_input with these
   # weights: geometric decay over-weights the single-surface, low-information
-  # regime that production sees most (50% one-surface clusters). The final
-  # retrain should also raise k_input to 8 (we infer with up to 12 surfaces).
-  k_input: 4
-  k_input_weights: [0.5, 0.25, 0.125, 0.125]
+  # regime that production sees most (50% one-surface clusters). k_input is
+  # 8 here (we infer with up to 12 surfaces; training had only seen <=4).
+  k_input: 8
+  k_input_weights: [0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625]
   k_latin_target: 4
   k_non_latin_target: 2
   # Cap on surface length incl. the tag token; the batch's padded length, so
@@ -73,7 +73,12 @@ model:
   local_attention: 32
   max_position_embeddings: 64
   decoder: modernbert
-  kl_weight: 1.0e-3
+  # klprobe (1-epoch, v3, S=4, geometric k): beta 1e-2/0.03/0.1 kept the
+  # selectivity margin flat (median 1.76-1.92) while the posterior became
+  # informative -- "J. Smith" carried a wider posterior than "John Allan
+  # Smith" (ratio up to 1.4x); 0.3 collapsed onto the prior (margin 1.10,
+  # val_ce +27%). 1e-2 picked: clearest ordering + best 1-epoch val_ce.
+  kl_weight: 1.0e-2
   # Multi-sample ELBO: decode S reparameterized latents per cluster per step
   # and average the CE. S=4 makes the learned posterior variance reflect
   # expected decode quality (lower reconstruction gradient variance).
