@@ -28,6 +28,7 @@ from transformers.models.modernbert_decoder.modeling_modernbert_decoder import M
 from transformers.models.t5.modeling_t5 import T5Stack
 
 from .config_classes import ConfigForModel
+from .configid import configid
 
 
 class OdinModel(nn.Module):
@@ -105,6 +106,11 @@ class OdinModel(nn.Module):
         self.encoder.embeddings.tok_embeddings.weight = shared
         self.lm_head = nn.Linear(d, vocab_size, bias=False)
         self.lm_head.weight = shared
+
+    @property
+    def configid(self) -> str:
+        """Two-part architecture checksum ``<wiring>.<layout>`` (see :mod:`.configid`)."""
+        return configid(self.config, self)
 
     def _decoder_embed_module(self) -> nn.Embedding:
         """The decoder's token-embedding module (family-dependent)."""

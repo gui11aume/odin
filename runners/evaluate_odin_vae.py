@@ -40,6 +40,7 @@ if str(RUNNER_DIR) not in sys.path:
 import helpers  # noqa: E402
 from odin_vae.augment import SCRIPTS, LetterAugmenter  # noqa: E402
 from odin_vae.config_classes import ConfigForRoot  # noqa: E402
+from odin_vae.configid import verify_configid  # noqa: E402
 from odin_vae.data.adapters import ClusterSampleAdapter  # noqa: E402
 from odin_vae.data.collators import OdinVAECollator  # noqa: E402
 from odin_vae.model import OdinModel  # noqa: E402
@@ -68,6 +69,7 @@ def load_model(root_cfg: ConfigForRoot, tokenizer, checkpoint: Path) -> OdinMode
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
+    verify_configid(model, checkpoint)
     ckpt = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
     state = ckpt.get("state_dict", ckpt)
     prefix = "model."
@@ -276,6 +278,7 @@ def main(argv: list[str] | None = None) -> None:
 
     report = {
         "checkpoint": str(args.checkpoint),
+        "configid": model.configid,
         "label": args.label,
         "key_range": [lo, hi],
         "val": val_stats,

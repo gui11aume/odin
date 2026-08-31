@@ -59,6 +59,9 @@ class OdinVAELightningHarness(pl.LightningModule):
     ):
         super().__init__()
         self.model = model
+        # Stamped into every checkpoint's hyper_parameters so that
+        # verify_configid can check the wiring part of the configid.
+        self.save_hyperparameters({"configid": model.configid})
         self.tokenizer = tokenizer
         self.val_shard_pattern = val_shard_pattern
         self.n_generation_clusters = n_generation_clusters

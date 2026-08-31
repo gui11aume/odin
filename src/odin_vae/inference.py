@@ -27,6 +27,7 @@ import torch
 
 from odin_vae.augment import SCRIPTS
 from odin_vae.config_classes import ConfigForRoot
+from odin_vae.configid import verify_configid
 from odin_vae.model import OdinModel
 
 __all__ = ["MatchResult", "OdinInference", "Posterior"]
@@ -163,6 +164,7 @@ class OdinInference:
             bos_token_id=tokenizer.bos_token_id,
             eos_token_id=tokenizer.eos_token_id,
         )
+        verify_configid(model, checkpoint)
         model.load_state_dict(_load_state_dict(checkpoint), strict=True)
         return cls(model, tokenizer, device=device, max_surfaces=max_surfaces, max_tokens=max_tokens)
 

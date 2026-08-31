@@ -10,6 +10,7 @@ from .config_classes import (
     ConfigForRoot,
     ConfigForWebDataset,
 )
+from .configid import configid, configid_of_checkpoint, verify_configid
 from .model import OdinModel
 
 __all__ = [
@@ -22,4 +23,7 @@ __all__ = [
     "ConfigForRoot",
     "ConfigForWebDataset",
     "OdinModel",
+    "configid",
+    "configid_of_checkpoint",
+    "verify_configid",
 ]

@@ -119,7 +119,12 @@ if __name__ == "__main__":
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
-    log.info("Model: %d parameters (decoder=%s)", sum(p.numel() for p in model.parameters()), root_cfg.model.decoder)
+    log.info(
+        "Model: %d parameters (decoder=%s) configid=%s",
+        sum(p.numel() for p in model.parameters()),
+        root_cfg.model.decoder,
+        model.configid,
+    )
 
     aug_cfg = root_cfg.augmentation
     augmenter = LetterAugmenter(aug_cfg.rate, _load_letter_frequencies(root_cfg.data_root), aug_cfg.confusion_weight)
