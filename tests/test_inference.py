@@ -27,6 +27,7 @@ def tokenizer():
 
 @pytest.fixture(scope="session")
 def small_model(tokenizer):
+    torch.manual_seed(0)
     config = ConfigForModel(
         tokenizer_path="unused",
         hidden_size=32,
@@ -45,7 +46,6 @@ def small_model(tokenizer):
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
-    torch.manual_seed(0)
     return model
 
 
@@ -145,7 +145,7 @@ def test_generate_greedy_mode_reproducible(odin) -> None:
 
 def test_decode_matches_direct_greedy(odin) -> None:
     mu = odin.posterior(SINGLE).mu
-    ids = odin.model.generate(mu, odin.tag_ids["la"])
+    ids = odin.model.generate(mu, odin.tag_ids["la"], max_new_tokens=48)
     expected = odin.tokenizer.decode(ids, skip_special_tokens=True)
     assert odin.decode(SINGLE, "la") == expected
 
