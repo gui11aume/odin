@@ -378,8 +378,12 @@ static int encode_core(const uint8_t *s, int n, uint16_t *out, Scratch *ts) {
 #define CACHE_SLOTS 4096
 #define CACHE_MAX_IDS 128
 
+// Seqlock: `seq` is odd while a writer is publishing a new payload, even when
+// the payload is stable. Readers validate `seq` before and after copying the
+// payload; a writer interleaving with a read invalidates it (odd or changed).
 typedef struct {
-    _Atomic uint64_t hash;
+    _Atomic unsigned seq;
+    uint64_t hash;
     uint16_t len;
     uint8_t prefix[8];
     uint16_t ids[CACHE_MAX_IDS];
@@ -400,23 +404,30 @@ static int encode_one(const uint8_t *s, int n, uint16_t *out, Scratch *ts) {
     if (n == 0) return 0;
     uint64_t h = fnv64(s, n);
     CacheEntry *e = &g_cache[h & (CACHE_SLOTS - 1)];
-    uint64_t eh = atomic_load_explicit(&e->hash, memory_order_acquire);
-    if (eh == h && e->len > 0 && e->len <= CACHE_MAX_IDS) {
+    for (int attempt = 0; attempt < 3; attempt++) {
+        unsigned v1 = atomic_load_explicit(&e->seq, memory_order_acquire);
+        if (v1 & 1u) continue;  // writer in progress
+        if (e->hash != h) break;  // slot stably holds another string: no hit
         uint16_t len = e->len;
+        if (len == 0 || len > CACHE_MAX_IDS) break;
         int pc = (len < 8) ? (int)len : 8;
-        if (memcmp(e->prefix, s, pc) == 0) {
+        if (memcmp(e->prefix, s, pc) != 0) break;
+        if (atomic_load_explicit(&e->seq, memory_order_acquire) == v1) {
             memcpy(out, e->ids, (size_t)len * 2);
             return (int)len;
         }
     }
     int k = encode_core(s, n, out, ts);
     if (k <= CACHE_MAX_IDS) {
+        unsigned v = atomic_load_explicit(&e->seq, memory_order_acquire);
+        atomic_store_explicit(&e->seq, v + 1, memory_order_release);
+        e->hash = h;
         memcpy(e->ids, out, (size_t)k * 2);
         int pc = (k < 8) ? k : 8;
         memcpy(e->prefix, s, (size_t)pc);
         if (pc < 8) memset(e->prefix + pc, 0, (size_t)(8 - pc));
         e->len = (uint16_t)k;
-        atomic_store_explicit(&e->hash, h, memory_order_release);
+        atomic_store_explicit(&e->seq, v + 2, memory_order_release);
     }
     return k;
 }
