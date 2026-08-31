@@ -102,6 +102,10 @@ class ConfigForModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
     tokenizer_path: str = pydantic.Field(description="Directory of the trained byte-BPE tokenizer.")
+    # Use the frozen C tokenizer (odin_tokenizer_fast) instead of the
+    # HuggingFace PreTrainedTokenizerFast. Falls back to HF if the C
+    # extension is not built or its vocab checksum does not match.
+    use_fast_tokenizer: bool = pydantic.Field(default=True)
     hidden_size: int = pydantic.Field(default=128, gt=0)
     attention_heads: int = pydantic.Field(default=4, gt=0)
     intermediate_size: int = pydantic.Field(default=512, gt=0)

@@ -4,7 +4,8 @@ UV_VERSION := 0.12.5
 .PHONY: install \
 	test test-cov \
 	format lint check-types pre-commit \
-	check-uv
+	check-uv \
+	tokenizer-c tokenizer-c-tables tokenizer-c-clean
 
 default: install
 
@@ -32,6 +33,18 @@ test: install
 
 test-cov: install
 	uv run pytest -v test/ --cov=./src/ --cov-branch --cov-report=xml
+
+
+# Frozen C tokenizer (src/odin_tokenizer_fast). The generated tables header is
+# committed; only the .so is built (it is git-ignored).
+tokenizer-c:
+	$(MAKE) -C src/odin_tokenizer_fast/c
+
+tokenizer-c-tables:
+	$(MAKE) -C src/odin_tokenizer_fast/c tables
+
+tokenizer-c-clean:
+	$(MAKE) -C src/odin_tokenizer_fast/c clean
 
 
 # CI tools

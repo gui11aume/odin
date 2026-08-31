@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import random
 
+import numpy as np
 import torch
 from torch.utils.data import get_worker_info
 
@@ -61,6 +62,12 @@ class OdinVAECollator:
         self.pad_token_id = tokenizer.pad_token_id
         self.eos_token_id = tokenizer.eos_token_id
         self._tag_ids = {tag: tokenizer.convert_tokens_to_ids(f"[{tag}]") for tag in SCRIPTS}
+        # Fast tokenizers expose a vectorized encode_padded(texts, max_len)
+        # that encodes + right-pads in one (multi-threaded) C call. When it is
+        # available we build the token tensors from numpy directly, which is
+        # the hot path of training. Otherwise we fall back to per-string
+        # encode + Python padding (the classic behavior).
+        self._fast = hasattr(tokenizer, "encode_padded")
         self._batch_idx = 0
         self.n_truncated = 0
 
@@ -134,6 +141,50 @@ class OdinVAECollator:
             self.n_truncated += 1
         return ids
 
+    def _fast_encode_rows(
+        self, tags: list[str], texts: list[str], *, with_tag: bool, with_eos: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Vectorized encode + pad, bit-identical to the per-string path.
+
+        Semantics matched to ``_tokenize``:
+          * with_tag:  row = [tag_id] + enc(text), truncated to max_tokens
+            (a tag counts against the budget, so text gets max_tokens - 1).
+          * with_eos:  row = enc(text) truncated to max_tokens, then + eos.
+        The returned width is the max row length in the batch (like the
+        legacy ``pad``), right-padded with pad_token_id, mask 1 on real tokens.
+        """
+        n = len(texts)
+        if with_tag:
+            budget = self.max_tokens - 1
+        else:
+            budget = self.max_tokens
+        buf, raw = self.tokenizer.encode_padded(texts, budget)
+        raw = raw.astype(np.int64)
+        clip = np.minimum(raw, budget)  # text tokens actually kept
+        self.n_truncated += int((raw > budget).sum())
+        row_len = clip + (1 if with_tag else 0) + (1 if with_eos else 0)
+        if n == 0:
+            return (
+                torch.empty((0, 0), dtype=torch.long),
+                torch.empty((0, 0), dtype=torch.long),
+            )
+        width = int(row_len.max())
+        ids_np = np.full((n, width), self.pad_token_id, dtype=np.uint16)
+        if with_tag:
+            ids_np[:, 0] = [self._tag_ids[t] for t in tags]
+            fill = min(width - 1, budget)
+            if fill > 0:
+                ids_np[:, 1 : 1 + fill] = buf[:, :fill]
+        else:
+            fill = min(width, budget)
+            if fill > 0:
+                ids_np[:, :fill] = buf[:, :fill]
+            if with_eos:
+                ids_np[np.arange(n), clip.astype(np.intp)] = self.eos_token_id
+        idx = np.arange(width)[None, :]
+        mask_np = (idx < row_len[:, None]).astype(np.int64)
+        return torch.from_numpy(ids_np).to(torch.long), torch.from_numpy(mask_np).to(torch.long)
+
     # ------------------------------------------------------------------ #
     def __call__(self, examples: list[dict]) -> dict:
         worker = get_worker_info()
@@ -158,21 +209,30 @@ class OdinVAECollator:
                 target_rows.append((tags[j], self.augmenter.corrupt(tags[j], cells[j], rng)))
         self._batch_idx += 1
 
-        surf_ids = [self._tokenize(text, tag) for tag, text in surface_rows]
-        tgt_ids = [self._tokenize(text, None) + [self.eos_token_id] for tag, text in target_rows]
         tgt_tags = [self._tag_ids[tag] for tag, _ in target_rows]
 
-        def pad(rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
-            length = max(len(row) for row in rows)
-            ids = torch.full((len(rows), length), self.pad_token_id, dtype=torch.long)
-            mask = torch.zeros((len(rows), length), dtype=torch.long)
-            for i, row in enumerate(rows):
-                ids[i, : len(row)] = torch.tensor(row, dtype=torch.long)
-                mask[i, : len(row)] = 1
-            return ids, mask
+        if self._fast:
+            surf_ids_t, surf_mask_t = self._fast_encode_rows(
+                [tag for tag, _ in surface_rows], [text for _, text in surface_rows], with_tag=True, with_eos=False
+            )
+            tgt_ids_t, tgt_mask_t = self._fast_encode_rows(
+                [tag for tag, _ in target_rows], [text for _, text in target_rows], with_tag=False, with_eos=True
+            )
+        else:
+            surf_ids = [self._tokenize(text, tag) for tag, text in surface_rows]
+            tgt_ids = [self._tokenize(text, None) + [self.eos_token_id] for tag, text in target_rows]
 
-        surf_ids_t, surf_mask_t = pad(surf_ids)
-        tgt_ids_t, tgt_mask_t = pad(tgt_ids)
+            def pad(rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
+                length = max(len(row) for row in rows)
+                ids = torch.full((len(rows), length), self.pad_token_id, dtype=torch.long)
+                mask = torch.zeros((len(rows), length), dtype=torch.long)
+                for i, row in enumerate(rows):
+                    ids[i, : len(row)] = torch.tensor(row, dtype=torch.long)
+                    mask[i, : len(row)] = 1
+                return ids, mask
+
+            surf_ids_t, surf_mask_t = pad(surf_ids)
+            tgt_ids_t, tgt_mask_t = pad(tgt_ids)
         return {
             "surf_ids": surf_ids_t,
             "surf_mask": surf_mask_t,

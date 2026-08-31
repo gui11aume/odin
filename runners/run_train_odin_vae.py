@@ -47,8 +47,28 @@ def _resolve_strategy(harness_cfg) -> strategies.DDPStrategy | str:
     return "auto"
 
 
-def _setup_tokenizer(path: str) -> PreTrainedTokenizerFast:
+def _setup_tokenizer(path: str, use_fast: bool = True):
+    """Build the tokenizer.
+
+    With ``use_fast`` we prefer the frozen C tokenizer (``odin_tokenizer_fast``),
+    which is a drop-in for the HF fast tokenizer on this repo's API surface and
+    is ~15-55x faster. On any failure (extension not built, vocab checksum
+    mismatch, missing JSON) we log and fall back to ``PreTrainedTokenizerFast``.
+    """
+    if use_fast:
+        try:
+            from odin_tokenizer_fast import OdinFastTokenizer
+
+            tokenizer = OdinFastTokenizer(str(Path(path) / "tokenizer.json"))
+            log.info("Using the fast C tokenizer (OdinFastTokenizer).")
+            return _validate_tokenizer(tokenizer, path)
+        except Exception as exc:  # noqa: BLE001  # fall back to HF on any setup problem
+            log.warning("Fast tokenizer unavailable (%s); falling back to PreTrainedTokenizerFast.", exc)
     tokenizer = PreTrainedTokenizerFast.from_pretrained(path)  # nosec: B615  # local directory, not the Hub
+    return _validate_tokenizer(tokenizer, path)
+
+
+def _validate_tokenizer(tokenizer, path: str):
     if tokenizer.pad_token_id is None or tokenizer.bos_token_id is None or tokenizer.eos_token_id is None:
         raise ValueError(f"Tokenizer at {path} must define pad/bos/eos special tokens.")
     for tag in SCRIPTS:
@@ -91,7 +111,7 @@ if __name__ == "__main__":
     pl.seed_everything(root_cfg.seed, workers=True)
     torch.set_float32_matmul_precision("medium")
 
-    tokenizer = _setup_tokenizer(root_cfg.model.tokenizer_path)
+    tokenizer = _setup_tokenizer(root_cfg.model.tokenizer_path, use_fast=root_cfg.model.use_fast_tokenizer)
     model = OdinModel(
         root_cfg.model,
         vocab_size=tokenizer.vocab_size,

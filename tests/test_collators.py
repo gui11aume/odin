@@ -72,8 +72,29 @@ def big_cluster(key: str, n_latin: int = 30, n_non_latin: int = 30) -> dict:
     return make_cluster(key, cells)
 
 
+class FakeFastTokenizer(FakeTokenizer):
+    """FakeTokenizer plus the vectorized encode_padded of the C tokenizer."""
+
+    def encode_padded(self, texts, max_len):
+        import numpy as np
+
+        rows = []
+        raws = []
+        for t in texts:
+            ids = self.encode(t)
+            raws.append(len(ids))
+            rows.append(ids[:max_len] + [self.pad_token_id] * max(0, max_len - len(ids)))
+        return np.array(rows, dtype=np.uint16), np.array(raws, dtype=np.uint16)
+
+
 def make_collator(rate: float = 0.0, **kwargs) -> OdinVAECollator:
     tokenizer = FakeTokenizer()
+    augmenter = LetterAugmenter(rate=rate, letter_frequencies={"la": [("x", 1.0)]})
+    return OdinVAECollator(tokenizer, augmenter, **kwargs)
+
+
+def make_fast_collator(rate: float = 0.0, **kwargs) -> OdinVAECollator:
+    tokenizer = FakeFastTokenizer()
     augmenter = LetterAugmenter(rate=rate, letter_frequencies={"la": [("x", 1.0)]})
     return OdinVAECollator(tokenizer, augmenter, **kwargs)
 
@@ -238,6 +259,22 @@ def test_deterministic_within_same_batch_position() -> None:
     batch2 = collator([cluster])
     for key in ("surf_ids", "surf_mask", "k_per_cluster", "target_ids", "target_mask", "target_tags", "target_primed"):
         assert torch.equal(batch1[key], batch2[key])
+
+
+def test_fast_path_matches_legacy() -> None:
+    examples = [rich_cluster(f"k{i}") for i in range(4)]
+    # long cells to exercise truncation on both paths
+    examples.append(make_cluster("long", [("la", "abcdefgh"), ("cn", "ijklmno"), ("la", "abcd")]))
+    slow = make_collator(max_tokens=6, seed=123)
+    fast = make_fast_collator(max_tokens=6, seed=123)
+    assert fast._fast and not slow._fast
+    b_slow = slow(examples)
+    b_fast = fast(examples)
+    for key in b_slow:
+        assert b_slow[key].shape == b_fast[key].shape, key
+        assert b_slow[key].equal(b_fast[key]), key
+    assert slow.n_truncated > 0  # truncation really exercised
+    assert slow.n_truncated == fast.n_truncated
 
 
 def test_max_tokens_truncation() -> None:

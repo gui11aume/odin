@@ -13,6 +13,9 @@ repos:
       - id: check-toml # Checks toml files for parseable syntax
       - id: check-json # Checks json files for parseable syntax
       - id: check-added-large-files # Prevents giant files from being committed
+        # The frozen C tokenizer's generated tables header is ~4.8 MB of
+        # committed table data (make tokenizer-c-tables regenerates it).
+        args: ["--maxkb=6000"]
       - id: check-case-conflict # Checks for files that would conflict in case-insensitive filesystems
       - id: check-merge-conflict # Checks for files that contain merge conflict strings
       - id: check-yaml # Checks yaml files for parseable syntax
@@ -60,4 +63,6 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"] # Scans for secrets using a baseline file
-        exclude: ^test/data/
+        # The generated tables header is machine output (its vocab-checksum
+        # hex line is a false positive for HexHighEntropyString).
+        exclude: ^test/data/|src/odin_tokenizer_fast/c/odin_tokenizer_tables\.h$
