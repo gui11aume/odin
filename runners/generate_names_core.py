@@ -636,6 +636,10 @@ full word, given = last full word + the initial (Karl J.).
 ### Rules
 - Do not invent names absent from the line.
 - Ignore addresses / IDs — extract only the name.
+- Titles / honorifics are NOT name parts — never put one in given or family: \
+Dr/Prof/Ing/Arch/Dipl/Mr/Mrs/Ms/Rev/Fr/Sir/Dame/Col/Hon/PhD/MD (English/German/\
+Spanish), Mme/Mlle (French), Dott/Avv (Italian), and equivalents from any \
+language.
 - Fix obvious OCR errors (5→S, 0→O, 1→l/I). Do not "correct" plausible spellings.
 - Prefer extract_name whenever ≥2 full-word tokens look like a person name.
 - A bare initial among ≥2 full words is fine (middle/leading); do not reject for that alone.
@@ -651,6 +655,8 @@ Do not invent a given from an initial.
 "TAN DAOXI" → given="Daoxi", family="Tan"
 "J SPIELER KARL" → given="Karl J.", family="Spieler"
 "Ernst A. Mayr" → given="Ernst A.", family="Mayr"
+"Peter Dr. Flury" → given="Peter", family="Flury" (title is not a name part)
+"Edmund Prof. Dr. Wax" → given="Edmund", family="Wax"
 "LOPEZ FERNANDEZ, IVAN" → given="Ivan", family="Lopez Fernandez"
 "NATOUR; GHALEB" → given="Ghaleb", family="Natour"
 "John S. Doe, 12 Main St, Boston MA" → given="John S.", family="Doe"

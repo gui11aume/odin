@@ -93,6 +93,8 @@ def test_prompt_teaches_patent_accept_and_narrow_reject() -> None:
     assert "TAN DAOXI" in contract
     assert "When unsure between extract and reject, call extract_name" in contract
     assert "Do NOT reject ALL-CAPS" in contract
+    assert "Titles / honorifics are NOT name parts" in contract
+    assert "Peter Dr. Flury" in contract
     tools = _mod.TOOLS
     not_a = next(t for t in tools if t["function"]["name"] == "not_a_person_name")
     assert "COBB JAMES S." in not_a["function"]["description"]
