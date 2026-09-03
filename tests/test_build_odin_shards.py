@@ -165,6 +165,48 @@ def test_build_with_explicit_val_input(tmp_path: Path) -> None:
     assert [rec["cells"][0] for rec in val_records] == ["value-3-la", "ext-la"]
 
 
+def test_build_with_val_shard_size(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus.txt"
+    n = 12
+    corpus.write_text("\n".join(make_line(i) for i in range(n)) + "\n", encoding="utf-8")
+    # Explicit test set: 4 lines, none present in the corpus (no leakage interaction).
+    test_file = tmp_path / "test.txt"
+    test_file.write_text(
+        "\n".join("\t".join(f"{tag}{{t-{i}-{tag}}}" for tag in SCRIPTS) for i in range(4)) + "\n", encoding="utf-8"
+    )
+    out = tmp_path / "wds"
+    _builder.main(
+        [
+            "--input",
+            str(corpus),
+            "--output",
+            str(out),
+            "--workers",
+            "1",
+            "--shard-size",
+            "8",
+            "--val-size",
+            "5",
+            "--val-shard-size",
+            "2",
+            "--test-input",
+            str(test_file),
+            "--test-shard-size",
+            "3",
+        ]
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["shard_size"] == 8
+    assert manifest["val_shard_size"] == 2
+    assert manifest["n_val"] == 5
+    assert manifest["n_val_shards"] == 3  # 2 + 2 + 1
+    assert manifest["n_train"] == 7
+    assert manifest["n_train_shards"] == 1
+    assert manifest["test_shard_size"] == 3
+    assert manifest["n_test"] == 4
+    assert manifest["n_test_shards"] == 2  # 3 + 1
+
+
 def test_build_counts_malformed(tmp_path: Path) -> None:
     corpus = tmp_path / "corpus.txt"
     lines = [make_line(0), "garbage-line", make_line(1)]

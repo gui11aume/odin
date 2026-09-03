@@ -333,7 +333,15 @@ def build_val_shards(val_path: Path, out_dir: Path, shard_size: int, key_prefix:
 
 
 def phase_b(
-    work_dir: Path, train_dir: Path, val_dir: Path, test_dir: Path, shard_size: int, workers: int, stats: dict
+    work_dir: Path,
+    train_dir: Path,
+    val_dir: Path,
+    test_dir: Path,
+    shard_size: int,
+    workers: int,
+    stats: dict,
+    val_shard_size: int | None = None,
+    test_shard_size: int | None = None,
 ) -> dict:
     offsets = json.loads((work_dir / "offsets.json").read_text(encoding="utf-8"))
     n_shards = len(offsets) - 1
@@ -363,9 +371,11 @@ def phase_b(
             log.info("Worker %d: shards [%d, %d)", w, lo, hi)
         for future in futures:
             train_results += future.result()
-    val_results = build_val_shards(work_dir / "flat_val.txt", val_dir, shard_size)
+    val_results = build_val_shards(work_dir / "flat_val.txt", val_dir, val_shard_size if val_shard_size else shard_size)
     test_results = (
-        build_val_shards(work_dir / "flat_test.txt", test_dir, shard_size, key_prefix="test-")
+        build_val_shards(
+            work_dir / "flat_test.txt", test_dir, test_shard_size if test_shard_size else shard_size, key_prefix="test-"
+        )
         if (work_dir / "flat_test.txt").exists()
         else []
     )
@@ -394,6 +404,18 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Explicit test corpus (.txt/.txt.gz): used verbatim as the test set (file order), "
         "and its lines are skipped in the train input.",
+    )
+    parser.add_argument(
+        "--val-shard-size",
+        type=int,
+        default=None,
+        help="Clusters per val shard (default: --shard-size; the v3 build used 375).",
+    )
+    parser.add_argument(
+        "--test-shard-size",
+        type=int,
+        default=None,
+        help="Clusters per test shard (default: --shard-size).",
     )
     args = parser.parse_args(argv)
 
@@ -431,7 +453,17 @@ def main(argv: list[str] | None = None) -> None:
         val_input=val_input_path,
         test_input=test_input_path,
     )
-    shard_results = phase_b(work_dir, train_dir, val_dir, test_dir, args.shard_size, args.workers, stats)
+    shard_results = phase_b(
+        work_dir,
+        train_dir,
+        val_dir,
+        test_dir,
+        args.shard_size,
+        args.workers,
+        stats,
+        val_shard_size=args.val_shard_size,
+        test_shard_size=args.test_shard_size,
+    )
 
     n_train_shards = len(shard_results["train"])
     n_val_shards = len(shard_results["val"])
@@ -441,6 +473,8 @@ def main(argv: list[str] | None = None) -> None:
         "val_input": str(val_input_path) if val_input_path else None,
         "test_input": str(test_input_path) if test_input_path else None,
         "shard_size": args.shard_size,
+        "val_shard_size": args.val_shard_size if args.val_shard_size is not None else args.shard_size,
+        "test_shard_size": args.test_shard_size if args.test_shard_size is not None else args.shard_size,
         "n_total": stats["total"],
         "n_train": stats["n_train"],
         "n_val": stats["n_val"],
