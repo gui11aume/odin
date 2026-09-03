@@ -2,14 +2,14 @@
 # Shards are built by runners/build_odin_shards.py into data_root.
 
 seed: 123
-# v3: v2 + a 3,000-cluster test split carved from the pool (seed 456);
-# val is byte-identical to v2 (5,996 clusters). See /mnt/nvme1/odin_wds_v3/manifest.json.
+# v4 (inventor-only): the phase-4 repaired inventor corpus, companies excluded.
+# train 4,253,801 / val 5,996 / test 3,000. See /mnt/nvme1/odin_wds_v3/manifest.json.
 data_root: /mnt/nvme1/odin_wds_v3
 
 splits:
   train:
     dataset:
-      pattern: "train/shard-{000000..002187}.tar.gz"
+      pattern: "train/shard-{000000..002077}.tar.gz"
       n_instances_per_shard: 2048
     dataloader:
       # Sweep stage 1+2 winner: smaller effective batch beats 256/512/1024
@@ -34,12 +34,12 @@ splits:
       persistent_workers: false
       pin_memory: true
   # Never trained on and never used for selection (epoch/hyperparameter);
-  # evaluated only after training via trainer.test. 2 shards -> 1 GPU per
-  # rank up to 2 GPUs.
+  # evaluated only after training via trainer.test. 16 shards -> 1 GPU per
+  # rank up to 16 GPUs.
   test:
     dataset:
-      pattern: "test/shard-{000000..000001}.tar.gz"
-      n_instances_per_shard: 1500
+      pattern: "test/shard-{000000..000015}.tar.gz"
+      n_instances_per_shard: 188
     dataloader:
       batch_size: 256
       drop_last_batch: false
@@ -96,7 +96,7 @@ training:
   devices: 2
   strategy: ddp
   precision: bf16-mixed
-  max_epochs: 10
+  max_epochs: 15
   # <= 0: auto -> one full pass over the train shards per epoch (per rank).
   limit_train_batches: -1
   val_check_interval: 1.0
