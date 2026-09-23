@@ -1,10 +1,10 @@
 """Letter-level corruption for Odin name surfaces.
 
 The corruption mirrors small transcription/OCR errors in patent data: with
-probability ``rate`` per letter, the letter is either deleted or substituted.
+probability `rate` per letter, the letter is either deleted or substituted.
 Substitutions are drawn from a script-specific visual-confusion class with
-probability ``confusion_weight`` (e.g. Cyrillic ``а``/latin ``a``, Arabic
-``ب``/``ت``) and from the corpus letter-frequency table otherwise.
+probability `confusion_weight` (e.g. Cyrillic `а`/latin `a`, Arabic
+`ب`/`ت`) and from the corpus letter-frequency table otherwise.
 
 CJK scripts (cn/jp/kr) are never corrupted: every character there is a full
 semantic unit, and the natural variant diversity for those scripts is already
@@ -138,7 +138,7 @@ CONFUSION_GROUPS: dict[str, tuple[str, ...]] = {
 def _merge_groups(groups: Iterable[str]) -> dict[str, tuple[str, ...]]:
     """Merge overlapping confusion groups into a letter -> class-mates map.
 
-    Groups are merged transitively (``ab`` + ``bc`` puts ``a`` and ``c`` in
+    Groups are merged transitively (`ab` + `bc` puts `a` and `c` in
     the same class). The result maps every letter to its sorted class-mates.
     """
     parent: dict[str, str] = {}
@@ -170,7 +170,7 @@ class LetterAugmenter:
 
     Args:
         rate: Probability of corrupting each letter (0 disables).
-        letter_frequencies: Optional per-script table of ``(letter, weight)``
+        letter_frequencies: Optional per-script table of `(letter, weight)`
             pairs used for the uniform-substitution branch.
         confusion_weight: Probability that a substitution is drawn from the
             visual-confusion class of the original letter.

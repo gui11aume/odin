@@ -32,19 +32,19 @@ _TAG_PREFIX = "["
 
 
 def one_cycle_total_steps(per_epoch_batches: float, max_epochs: int, accumulate_grad_batches: int) -> int:
-    """Optimizer steps OneCycleLR must cover.
+    """Optimizer steps that must be covered by OneCycleLR.
 
     Lightning steps the scheduler per optimizer step, and a trailing partial
     accumulation group at the end of the epoch limit still triggers a step, so
-    each epoch contributes ``ceil(per_epoch / accum)`` steps. Truncating the
+    each epoch contributes `ceil(per_epoch / accum)` steps. Truncating the
     division undercounts by one whenever the division is inexact (crash:
-    ``Tried to step N times. The specified number of total steps is N-1``).
+    `Tried to step N times. The specified number of total steps is N-1`).
     """
     return max(1, math.ceil(per_epoch_batches / accumulate_grad_batches) * max(1, max_epochs))
 
 
 class OdinVAELightningHarness(pl.LightningModule):
-    """Wraps an ``OdinModel`` and logs loss components + periodic generations."""
+    """Wraps an `OdinModel` and logs loss components + periodic generations."""
 
     def __init__(
         self,
@@ -79,7 +79,7 @@ class OdinVAELightningHarness(pl.LightningModule):
         optimizer_cls = getattr(optim, trainer.optimizer)
         optimizer = optimizer_cls(self.model.parameters(), lr=trainer.lr, **trainer.optimizer_kwargs)
 
-        # ``estimated_stepping_batches`` / ``num_training_batches`` are unreliable for
+        # `estimated_stepping_batches` / `num_training_batches` are unreliable for
         # length-less iterable datasets, so the total is derived from the per-epoch
         # batch limit (always an int for the endless train stream).
         limit = trainer.limit_train_batches
@@ -132,7 +132,7 @@ class OdinVAELightningHarness(pl.LightningModule):
         return cast(torch.Tensor, outputs["loss"])
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:  # noqa: ARG002
-        """Same measurement as validation, logged under ``test_`` (held-out split)."""
+        """Same measurement as validation, logged under `test_` (held-out split)."""
         outputs = self.model(**batch)
         self.log_dict(
             {"test_loss": outputs["loss"], "test_ce": outputs["ce"], "test_kl": outputs["kl"]},
@@ -181,7 +181,7 @@ class OdinVAELightningHarness(pl.LightningModule):
         return records
 
     def _encode_cluster(self, tags: list[str], cells: list[str], max_surfaces: int = 12) -> torch.Tensor:
-        """Encode one cluster's surfaces (clean) and return its ``mu`` vector."""
+        """Encode one cluster's surfaces (clean) and return its `mu` vector."""
         rows = list(zip(tags, cells))[:max_surfaces]
         ids = [self.tokenizer.encode(text, add_special_tokens=False)[:63] for _, text in rows]
         ids = [[self.tokenizer.convert_tokens_to_ids(f"{_TAG_PREFIX}{tag}]")] + row for tag, row in zip(tags, ids)]

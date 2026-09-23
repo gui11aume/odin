@@ -87,7 +87,7 @@ def test_minimal_build_round_trip(tmp_path: Path) -> None:
     assert manifest["n_val_shards"] == 1
 
     # Read the train shards back through the reader pipeline.
-    dataset = GrandWebDataset(f"{out}/{manifest['train_pattern']}", seed=123, is_endless=False)
+    dataset = GrandWebDataset(f"{out}/{manifest['train_pattern']}", seed=123, loop_back=False)
     records = {item["__key__"]: json.loads(item["json"]) for item in dataset}
     assert len(records) == 500
     rec = records["cluster-000000000"]
@@ -101,7 +101,7 @@ def test_minimal_build_round_trip(tmp_path: Path) -> None:
     assert rec256["cells"][0].startswith("value-")
 
     # Val shards: namespaced keys, disjoint from train.
-    val_dataset = GrandWebDataset(f"{out}/{manifest['val_pattern']}", seed=123, is_endless=False)
+    val_dataset = GrandWebDataset(f"{out}/{manifest['val_pattern']}", seed=123, loop_back=False)
     val_records = {item["__key__"]: json.loads(item["json"]) for item in val_dataset}
     assert len(val_records) == 100
     assert all(k.startswith("val-") for k in val_records)
@@ -152,14 +152,14 @@ def test_build_with_explicit_val_input(tmp_path: Path) -> None:
 
     records = {
         item["__key__"]: json.loads(item["json"])
-        for item in GrandWebDataset(f"{out}/{manifest['train_pattern']}", seed=123, is_endless=False)
+        for item in GrandWebDataset(f"{out}/{manifest['train_pattern']}", seed=123, loop_back=False)
     }
     assert len(records) == 7
     assert all(rec["cells"][0] != "value-3-la" for rec in records.values())  # val line never trained on
 
     val_records = [
         json.loads(item["json"])
-        for item in GrandWebDataset(f"{out}/{manifest['val_pattern']}", seed=123, is_endless=False)
+        for item in GrandWebDataset(f"{out}/{manifest['val_pattern']}", seed=123, loop_back=False)
     ]
     # File order preserved: the corpus line first, then the external line.
     assert [rec["cells"][0] for rec in val_records] == ["value-3-la", "ext-la"]

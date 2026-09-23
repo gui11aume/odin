@@ -96,7 +96,7 @@ def make_datamodule(shard_root: Path, collator, batch_size: int = 8) -> OdinVAED
 
 def test_reader_round_trip(shard_root: Path) -> None:
     manifest = json.loads((shard_root / "manifest.json").read_text())
-    dataset = GrandWebDataset(f"{shard_root}/{manifest['train_pattern']}", seed=123, is_endless=False)
+    dataset = GrandWebDataset(f"{shard_root}/{manifest['train_pattern']}", seed=123, loop_back=False)
     keys = [item["__key__"] for item in dataset]
     assert len(keys) == manifest["n_train"]
     assert keys[0].startswith("cluster-")
@@ -127,7 +127,7 @@ def test_resume_skips_processed_shards(shard_root: Path) -> None:
     urls = wds.shardlists.expand_urls(pattern)
     epoch0 = urls[:]
     random.Random(123 + 0).shuffle(epoch0)
-    dataset = GrandWebDataset(pattern, seed=123, is_endless=False)
+    dataset = GrandWebDataset(pattern, seed=123, loop_back=False)
     dataset.set_progress(0, 2)  # skip the first two shards
     urls_seen: list[str] = []
     for item in dataset:
@@ -154,9 +154,9 @@ def test_dataset_progress_round_trip(shard_root: Path) -> None:
                 seen.append(url)
         return seen
 
-    src = GrandWebDataset(pattern, seed=123, is_endless=False)
+    src = GrandWebDataset(pattern, seed=123, loop_back=False)
     src.set_progress(1, 3)
-    dst = GrandWebDataset(pattern, seed=123, is_endless=False)
+    dst = GrandWebDataset(pattern, seed=123, loop_back=False)
     assert dst.seed == 123
     dst.set_progress(*src.progress())
     assert dst.progress() == (1, 3)
@@ -164,7 +164,7 @@ def test_dataset_progress_round_trip(shard_root: Path) -> None:
     # Endless streams resume at the offset of the epoch permutation.
     perm = wds.shardlists.expand_urls(pattern)
     random.Random(123).shuffle(perm)
-    src_e = GrandWebDataset(pattern, seed=123, is_endless=True)
+    src_e = GrandWebDataset(pattern, seed=123, loop_back=True)
     src_e.set_progress(0, 1)
     head = [d["url"] for d in itertools.islice(src_e.shardlist, 3)]
     assert head == perm[1:4]
@@ -175,7 +175,7 @@ def make_auto_loader(shard_root: Path, **loader_kwargs):
 
     manifest = json.loads((shard_root / "manifest.json").read_text())
     pattern = f"{shard_root}/{manifest['train_pattern']}"
-    dataset = GrandWebDataset(pattern, seed=123, is_endless=False)
+    dataset = GrandWebDataset(pattern, seed=123, loop_back=False)
     kwargs = dict(batch_size=8, num_workers=0, **loader_kwargs)
     return DataLoaderWithAutoCheckpoint(dataset=dataset, **kwargs), dataset
 
@@ -345,11 +345,11 @@ def test_checkpoint_resumes_data_offset(shard_root: Path, monkeypatch: pytest.Mo
 
 def test_val_split_finite(shard_root: Path) -> None:
     manifest = json.loads((shard_root / "manifest.json").read_text())
-    dataset = GrandWebDataset(f"{shard_root}/{manifest['val_pattern']}", seed=123, is_endless=False)
+    dataset = GrandWebDataset(f"{shard_root}/{manifest['val_pattern']}", seed=123, loop_back=False)
     keys = [item["__key__"] for item in dataset]
     assert len(keys) == manifest["n_val"]
     # Disjoint from train by construction of the build.
-    train_dataset = GrandWebDataset(f"{shard_root}/{manifest['train_pattern']}", seed=123, is_endless=False)
+    train_dataset = GrandWebDataset(f"{shard_root}/{manifest['train_pattern']}", seed=123, loop_back=False)
     train_keys = {item["__key__"] for item in train_dataset}
     assert train_keys.isdisjoint(keys)
 

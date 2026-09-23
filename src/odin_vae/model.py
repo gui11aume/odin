@@ -1,18 +1,18 @@
 """Odin VAE model: permutation-invariant encoder + tag-primed decoder.
 
-Architecture (encoder, latent and decoder all share ``hidden_size``):
+Architecture (encoder, latent and decoder all share `hidden_size`):
 
-* Encoder: ``ModernBertModel``. Each surface (``[tag] + tokens``) is encoded
+* Encoder: `ModernBertModel`. Each surface (`[tag] + tokens`) is encoded
   independently; the last non-pad position of each surface is pooled with a
   single learned query (permutation invariant over the set of surfaces).
-* Heads: two linear maps from the pooled vector to ``mu`` and ``logvar``; the
-  latent ``z`` is reparameterized during training and ``mu`` at inference.
-* Decoder: ``ModernBertDecoderModel`` with the latent prepended as a prefix
+* Heads: two linear maps from the pooled vector to `mu` and `logvar`; the
+  latent `z` is reparameterized during training and `mu` at inference.
+* Decoder: `ModernBertDecoderModel` with the latent prepended as a prefix
   position (z-prefix), or the T5 decoder stack with the latent as
-  cross-attention memory (``decoder="t5"``). The decoder input is
-  ``[BOS, tag, tokens...]`` and the target is ``[tag, tokens...]``; priming
-  is the ``tag`` token, so generation seeded with ``[gk]`` yields the greek
-  variant of the person encoded in ``z``.
+  cross-attention memory (`decoder="t5"`). The decoder input is
+  `[BOS, tag, tokens...]` and the target is `[tag, tokens...]`; priming
+  is the `tag` token, so generation seeded with `[gk]` yields the greek
+  variant of the person encoded in `z`.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class OdinModel(nn.Module):
         self.decoder_family: str = config.decoder
         d = config.hidden_size
 
-        enc_cfg = ModernBertConfig(
+        encoder_cfg = ModernBertConfig(
             vocab_size=vocab_size,
             hidden_size=d,
             intermediate_size=config.intermediate_size,
@@ -62,14 +62,14 @@ class OdinModel(nn.Module):
             local_attention=config.local_attention,
             pad_token_id=pad_token_id,
         )
-        self.encoder = ModernBertModel(enc_cfg)
+        self.encoder = ModernBertModel(encoder_cfg)
         self.pool_query = nn.Parameter(torch.empty(d))
         nn.init.normal_(self.pool_query, std=0.02)
         self.mu_head = nn.Linear(d, d)
         self.logvar_head = nn.Linear(d, d)
 
         if config.decoder == "modernbert":
-            dec_cfg = ModernBertDecoderConfig(
+            decoder_cfg = ModernBertDecoderConfig(
                 vocab_size=vocab_size,
                 hidden_size=d,
                 intermediate_size=config.intermediate_size,
@@ -79,7 +79,7 @@ class OdinModel(nn.Module):
                 local_attention=config.local_attention,
                 pad_token_id=pad_token_id,
             )
-            self.decoder = ModernBertDecoderModel(dec_cfg)
+            self.decoder = ModernBertDecoderModel(decoder_cfg)
             self.z_proj = nn.Linear(d, d, bias=False)
         elif config.decoder == "t5":
             t5_cfg = T5Config(
@@ -102,6 +102,7 @@ class OdinModel(nn.Module):
             raise ValueError(f"Unknown decoder family: {config.decoder!r}")
 
         # Weight tying: encoder input == decoder input == LM head (T5-style).
+        # Outputs are computed as softmax(hidden . embeddings) by the LM head.
         shared = self._decoder_embed_module().weight
         self.encoder.embeddings.tok_embeddings.weight = shared
         self.lm_head = nn.Linear(d, vocab_size, bias=False)
@@ -109,7 +110,7 @@ class OdinModel(nn.Module):
 
     @property
     def configid(self) -> str:
-        """Two-part architecture checksum ``<wiring>.<layout>`` (see :mod:`.configid`)."""
+        """Two-part architecture checksum `<wiring>.<layout>`."""
         return configid(self.config, self)
 
     def _decoder_embed_module(self) -> nn.Embedding:
@@ -125,11 +126,11 @@ class OdinModel(nn.Module):
     # Encoder side
     # ------------------------------------------------------------------ #
     def _cluster_pool(self, v: torch.Tensor, k_per_cluster: torch.Tensor) -> torch.Tensor:
-        """Permutation-invariant PMA pooling of variable-size clusters.
+        """Permutation-invariant attention pooling of variable-size clusters.
 
         Args:
-            v: ``(N, d)`` per-surface vectors, rows laid out cluster-major.
-            k_per_cluster: ``(B,)`` surfaces per cluster (``sum == N``).
+            v: `(N, d)` per-surface vectors, rows laid out cluster-major.
+            k_per_cluster: `(B,)` surfaces per cluster (`sum == N`).
 
         The learned query is scored per row; the softmax is taken per cluster
         (masked to the cluster's own rows, stabilized by its max score), so
@@ -158,19 +159,19 @@ class OdinModel(nn.Module):
         k_per_cluster: torch.Tensor | None = None,
         k: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode a batch of surfaces into ``(mu, logvar)``.
+        """Encode a batch of surfaces into `(mu, logvar)`.
 
         Args:
-            surf_ids: ``(N, L)`` token ids, tag token prepended per surface,
+            surf_ids: `(N, L)` token ids, tag token prepended per surface,
                 rows laid out cluster-major.
-            surf_mask: ``(N, L)`` with 1 for real tokens (including the tag).
-            k_per_cluster: ``(B,)`` surfaces per cluster (``sum == N``).
-            k: Uniform shortcut for ``k_per_cluster`` (rows ``b*k..b*k+k-1``
-                form cluster ``b``); ``None`` with ``k_per_cluster=None``
+            surf_mask: `(N, L)` with 1 for real tokens (including the tag).
+            k_per_cluster: `(B,)` surfaces per cluster (`sum == N`).
+            k: Uniform shortcut for `k_per_cluster` (rows `b*k..b*k+k-1`
+                form cluster `b`); `None` with `k_per_cluster=None`
                 treats all rows as one cluster.
 
         Returns:
-            ``(mu, logvar)`` of shape ``(B, d)``.
+            `(mu, logvar)` of shape `(B, d)`.
         """
         n = surf_ids.shape[0]
         if k_per_cluster is None:
@@ -206,22 +207,22 @@ class OdinModel(nn.Module):
         """Teacher-forced step.
 
         Args:
-            surf_ids / surf_mask: ``(N, L_in)`` encoder inputs (tag prepended),
+            surf_ids / surf_mask: `(N, L_in)` encoder inputs (tag prepended),
                 rows laid out cluster-major.
-            k_per_cluster: ``(B,)`` surfaces per cluster.
-            target_ids / target_mask: ``(NK, L)`` target token ids (no tag).
-            target_tags: ``(NK,)`` tag token id of each target's true script.
-            target_primed: ``(NK,)`` 0/1 — primed rows are seeded with the tag
-                (decoder input ``[BOS, tag, t0, ...]``, labels ``[tag, t0, ...]``);
-                unprimed rows decode from the latent alone (``[BOS, t0, ...]``,
-                labels ``[t0, ...]``), the unknown-alphabet regime.
+            k_per_cluster: `(B,)` surfaces per cluster.
+            target_ids / target_mask: `(NK, L)` target token ids (no tag).
+            target_tags: `(NK,)` tag token id of each target's true script.
+            target_primed: `(NK,)` 0/1 — primed rows are seeded with the tag
+                (decoder input `[BOS, tag, t0, ...]`, labels `[tag, t0, ...]`);
+                unprimed rows decode from the latent alone (`[BOS, t0, ...]`,
+                labels `[t0, ...]`), the unknown-alphabet regime.
 
-        The reconstruction term is the multi-sample ELBO estimate: ``S =
-        num_latent_samples`` latents are drawn from the posterior and decoded
-        (``S = 1`` is the classic estimator); CE is averaged over the samples,
-        so the loss scale — and hence ``kl_weight`` — is unaffected by ``S``.
+        The reconstruction term is the multi-sample ELBO estimate: `S =
+        num_latent_samples` latents are drawn from the posterior and decoded
+        (`S = 1` is the classic estimator); CE is averaged over the samples,
+        so the loss scale — and hence `kl_weight` — is unaffected by `S`.
 
-        Returns a dict with ``loss`` (CE + ``kl_weight`` * KL), ``ce`` and ``kl``.
+        Returns a dict with `loss` (CE + `kl_weight` * KL), `ce` and `kl`.
         """
         b = k_per_cluster.shape[0]
         mu, logvar = self.encode(surf_ids, surf_mask, k_per_cluster=k_per_cluster)
@@ -269,8 +270,8 @@ class OdinModel(nn.Module):
         return {"loss": loss, "ce": ce, "kl": kl}
 
     def _decode_logits(self, z_rep: torch.Tensor, decoder_input: torch.Tensor, dec_mask: torch.Tensor) -> torch.Tensor:
-        """One teacher-forced decoder pass over ``decoder_input`` conditioned on
-        the per-row latents ``z_rep`` (NK, d). Returns logits aligned with the
+        """One teacher-forced decoder pass over `decoder_input` conditioned on
+        the per-row latents `z_rep` (NK, d). Returns logits aligned with the
         decoder-input positions that make a prediction (the z-prefix slot is
         dropped for the modernbert family, which prepends the latent)."""
         if self.decoder_family == "modernbert":
@@ -308,30 +309,30 @@ class OdinModel(nn.Module):
         *,
         include_eos: bool = True,
     ) -> tuple[float, list[float]]:
-        """Deterministic log-probability of one surface under the latent ``z``.
+        """Deterministic log-probability of one surface under the latent `z`.
 
-        The inference-time counterpart of ``forward`` without reparameterization
-        noise (``z`` is used as-is, i.e. ``mu``) and without a batch: the surface
+        The inference-time counterpart of `forward` without reparameterization
+        noise (`z` is used as-is, i.e. `mu`) and without a batch: the surface
         is teacher-forced in a single decoder pass.
 
-        Primed (``tag_id`` given): decoder input ``[BOS, tag, ...]`` — the
-        known-alphabet regime. Unprimed (``tag_id=None``): decoder input
-        ``[BOS, ...]`` — the unknown-alphabet regime.
+        Primed (`tag_id` given): decoder input `[BOS, tag, ...]` — the
+        known-alphabet regime. Unprimed (`tag_id=None`): decoder input
+        `[BOS, ...]` — the unknown-alphabet regime.
 
-        With ``include_eos`` (default, matching the training targets) the
+        With `include_eos` (default, matching the training targets) the
         surface is scored as a *complete* sequence: the context includes the
         full surface and the final prediction is the stop decision (EOS).
 
         Args:
-            z: Latent vector of shape ``(d,)`` or ``(1, d)`` (use ``mu``).
-            tag_id: Priming script tag token id, or ``None`` for unprimed.
+            z: Latent vector of shape `(d,)` or `(1, d)` (use `mu`).
+            tag_id: Priming script tag token id, or `None` for unprimed.
             token_ids: Surface token ids (no tag, no EOS).
             include_eos: Score the trailing EOS prediction (complete sequence).
 
         Returns:
-            ``(total_logprob, per_token_logprobs)`` aligned with the predicted
-            tokens: primed ``[tag, t0, ..., t_{n-1}(, EOS)]``, unprimed
-            ``[t0, ..., t_{n-1}(, EOS)]``.
+            `(total_logprob, per_token_logprobs)` aligned with the predicted
+            tokens: primed `[tag, t0, ..., t_{n-1}(, EOS)]`, unprimed
+            `[t0, ..., t_{n-1}(, EOS)]`.
         """
         ids = [int(t) for t in token_ids]
         if not ids:
@@ -417,16 +418,16 @@ class OdinModel(nn.Module):
         """Greedy/sample decoding of one surface.
 
         Args:
-            z: Latent vector of shape ``(d,)`` or ``(1, d)`` (use ``mu``).
-            tag_id: Token id of the priming script tag (e.g. ``[gk]``), or
-                ``None`` to decode without alphabet information (the
+            z: Latent vector of shape `(d,)` or `(1, d)` (use `mu`).
+            tag_id: Token id of the priming script tag (e.g. `[gk]`), or
+                `None` to decode without alphabet information (the
                 unknown-alphabet regime).
             max_new_tokens: Hard cap on generated tokens (excluding BOS/tag).
             temperature: 0 for greedy; >0 for sampling.
             top_p: Optional nucleus filter when sampling.
-            generator: Optional ``torch.Generator`` for reproducible sampling.
+            generator: Optional `torch.Generator` for reproducible sampling.
 
-        Returns the generated token ids (no BOS/tag), ending at ``[EOS]``.
+        Returns the generated token ids (no BOS/tag), ending at `[EOS]`.
         """
         was_training = self.training
         if was_training:
@@ -502,32 +503,32 @@ class OdinModel(nn.Module):
         top_p: float | None = None,
         generator: torch.Generator | None = None,
     ) -> tuple[list[list[int]], torch.Tensor, torch.Tensor]:
-        """Sample ``n_samples`` decodes from the posterior ``q(z | cluster)``.
+        """Sample `n_samples` decodes from the posterior `q(z | cluster)`.
 
-        The cluster is encoded once into ``(mu, logvar)``; each sample draws a
-        latent with the reparameterization ``z = mu + exp(0.5 logvar) * eps``
+        The cluster is encoded once into `(mu, logvar)`; each sample draws a
+        latent with the reparameterization `z = mu + exp(0.5 logvar) * eps`
         and decodes it with :meth:`generate`. This is the diversity path the
-        deterministic ``mu``-based :meth:`log_prob`/:meth:`generate` do not
+        deterministic `mu`-based :meth:`log_prob`/:meth:`generate` do not
         cover: a low-information cluster (e.g. an abbreviated name) should
-        carry a high ``logvar`` and yield many distinct decodes, while a
+        carry a high `logvar` and yield many distinct decodes, while a
         high-information cluster should collapse to (near-)identical ones.
 
         Args:
-            surf_ids / surf_mask: ``(N, L)`` encoder inputs for a single
+            surf_ids / surf_mask: `(N, L)` encoder inputs for a single
                 cluster (tag token prepended per surface), as for
                 :meth:`encode`.
             k_per_cluster / k: cluster layout, as for :meth:`encode` (the rows
                 must form exactly one cluster).
-            tag_id: priming script tag, or ``None`` (unknown-alphabet regime).
+            tag_id: priming script tag, or `None` (unknown-alphabet regime).
             n_samples: number of decodes (>= 1).
             max_new_tokens / temperature / top_p / generator: passed to
                 :meth:`generate` for every sample (one generator is shared by
                 the latent draws and all token draws, in order).
 
         Returns:
-            ``(samples, mu, logvar)`` — ``samples`` is a list of
-            ``n_samples`` token-id lists (no BOS/tag), and ``mu``/``logvar``
-            are ``(1, d)`` so the caller can inspect the posterior.
+            `(samples, mu, logvar)` — `samples` is a list of
+            `n_samples` token-id lists (no BOS/tag), and `mu`/`logvar`
+            are `(1, d)` so the caller can inspect the posterior.
         """
         if n_samples < 1:
             raise ValueError("n_samples must be >= 1.")

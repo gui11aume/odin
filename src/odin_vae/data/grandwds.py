@@ -7,20 +7,20 @@ Design
 ~~~~~~
 
 The shard order of an epoch is a full permutation without replacement of the
-shard list, seeded by ``seed + epoch``. Every rank and worker computes the
-identical permutation and then ``split_by_node``/``split_by_worker`` take
+shard list, seeded by `seed + epoch`. Every rank and worker computes the
+identical permutation and then `split_by_node`/`split_by_worker` take
 their strided subsequences, so DDP shards are disjoint by construction.
 Endless streams (train) cycle the permutation forever and are stopped
-externally (``limit_train_batches``); finite streams (val/test) stop after
+externally (`limit_train_batches`); finite streams (val/test) stop after
 one pass.
 
-Resume state is a pair of integers: ``(processed_epochs, processed_shards)``.
-Iteration starts at shard offset ``processed_shards`` of permutation
-``seed + processed_epochs``. The main process is the sole writer: it sets the
+Resume state is a pair of integers: `(processed_epochs, processed_shards)`.
+Iteration starts at shard offset `processed_shards` of permutation
+`seed + processed_epochs`. The main process is the sole writer: it sets the
 progress on the dataset before the DataLoader workers are forked, and the
 workers read it from the copy-on-write snapshot of the dataset they inherit
-at fork. This is why the pipeline requires ``multiprocessing_context="fork"``
-and ``persistent_workers=False`` (a persistent worker would keep iterating
+at fork. This is why the pipeline requires `multiprocessing_context="fork"`
+and `persistent_workers=False` (a persistent worker would keep iterating
 its original snapshot).
 """
 
@@ -38,7 +38,7 @@ class GrandShardList(wds.shardlists.SimpleShardList):
         self,
         urls: str | list[str],
         seed: int | None = None,
-        is_endless: bool = False,
+        loop_back: bool = False,
     ):
         """Initialize the GrandShardList.
 
@@ -46,11 +46,11 @@ class GrandShardList(wds.shardlists.SimpleShardList):
             urls: URLs (local paths) to the webdataset shards; a brace
                 pattern string is expanded.
             seed: Seed for the per-epoch shuffle (None for no shuffling).
-            is_endless: Whether the dataset cycles over the shards forever
+            loop_back: Whether the dataset cycles over the shards forever
                 (train) or stops after one pass (val/test).
         """
         super().__init__(urls, seed=seed)
-        self.is_endless = is_endless
+        self.loop_back = loop_back
         self.processed_epochs = 0
         self.processed_shards = 0
 
@@ -62,9 +62,9 @@ class GrandShardList(wds.shardlists.SimpleShardList):
     def __iter__(self):
         """Iterate over the shards, honoring the progress.
 
-        The first pass starts at shard offset ``processed_shards`` (resume);
+        The first pass starts at shard offset `processed_shards` (resume);
         for an endless list the epoch permutation then repeats forever and
-        must be stopped externally (e.g. ``limit_train_batches``).
+        must be stopped externally (e.g. `limit_train_batches`).
 
         Yields:
             dict: A dictionary containing the URL of each shard.
@@ -74,11 +74,12 @@ class GrandShardList(wds.shardlists.SimpleShardList):
         # Shuffle the shards if a seed is provided.
         if self.seed is not None:
             random.Random(self.seed + epoch).shuffle(urls)  # nosec: B311  # deterministic shard shuffle
-        # Start from the next shard, then cycle forever from the beginning.
+        # One pass through the shards (skip already processed shards).
         for url in urls[shards_processed:]:
             yield {"url": url}
-        if not self.is_endless:
+        if not self.loop_back:
             return
+        # Loop back: cycle forever, processing shards in the same order.
         while True:
             for url in urls:
                 yield {"url": url}
@@ -89,28 +90,28 @@ class GrandWebDataset(wds.WebDataset):
 
     Pipeline stages:
 
-    - ``GrandShardList``: per-epoch shuffle (seeded) + resume offset.
-    - ``wds.split_by_node``: strided shard assignment per DDP rank.
-    - ``wds.split_by_worker``: strided shard assignment per DataLoader worker.
-    - ``wds.cache.StreamingOpen``: opens shard files.
-    - ``tar_file_expander``: extracts tar archives on the fly.
-    - ``group_by_keys``: groups members into one sample per ``__key__``.
-    - ``check_empty``: raises if no shards are found.
+    - `GrandShardList`: per-epoch shuffle (seeded) + resume offset.
+    - `wds.split_by_node`: strided shard assignment per DDP rank.
+    - `wds.split_by_worker`: strided shard assignment per DataLoader worker.
+    - `wds.cache.StreamingOpen`: opens shard files.
+    - `tar_file_expander`: extracts tar archives on the fly.
+    - `group_by_keys`: groups members into one sample per `__key__`.
+    - `check_empty`: raises if no shards are found.
     """
 
     def __init__(
         self,
         urls: str | list[str],
         seed: int | None = None,
-        is_endless: bool = False,
+        loop_back: bool = False,
     ):
         """Initialize the GrandWebDataset.
 
         Args:
             urls: Local shard path(s); a brace pattern string (e.g.
-                ``"train/shard-{000000..000019}.tar.gz"``) is accepted.
+                `"train/shard-{000000..000019}.tar.gz"`) is accepted.
             seed: Seed for deterministic shard shuffling (None = no shuffle).
-            is_endless: Whether the dataset cycles forever (train) or is
+            loop_back: Whether the dataset cycles forever (train) or is
                 finite (val/test).
         """
         super(wds.WebDataset, self).__init__()
@@ -118,7 +119,7 @@ class GrandWebDataset(wds.WebDataset):
         self.shardlist = GrandShardList(
             urls=self.urls,
             seed=seed,
-            is_endless=is_endless,
+            loop_back=loop_back,
         )
         self.opener = wds.cache.StreamingOpen()
         self.expander = wds.pipelinefilter(wds.tariterators.tar_file_expander)
@@ -142,5 +143,5 @@ class GrandWebDataset(wds.WebDataset):
         self.shardlist.set_progress(processed_epochs, processed_shards)
 
     def progress(self) -> tuple[int, int]:
-        """Current resume progress ``(processed_epochs, processed_shards)``."""
+        """Current resume progress `(processed_epochs, processed_shards)`."""
         return self.shardlist.processed_epochs, self.shardlist.processed_shards

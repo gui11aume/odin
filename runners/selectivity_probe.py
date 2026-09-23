@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     pattern = f"{root_cfg.data_root}/{split_cfg.dataset.pattern}"
     records = [
         rec
-        for rec in ClusterSampleAdapter(urls=pattern, seed=root_cfg.seed, is_endless=False)
+        for rec in ClusterSampleAdapter(urls=pattern, seed=root_cfg.seed, loop_back=False)
         if in_range(rec["key"], lo, hi)
     ]
     log.info("%s records in key range [%d, %d): %d", args.split, lo, hi, len(records))

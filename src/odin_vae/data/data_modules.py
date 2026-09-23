@@ -101,7 +101,7 @@ class OdinVAEDataModule(pl.LightningDataModule):
         self.datasets[split] = ClusterSampleAdapter(
             urls=self._split_pattern(split),
             seed=self.seed,
-            is_endless=split == "train",
+            loop_back=split == "train",
         )
 
     def _ensure_loader(self, split: str) -> DataLoaderWithAutoCheckpoint:
@@ -145,7 +145,7 @@ class OdinVAEDataModule(pl.LightningDataModule):
 
         The train split is checkpoint-resident: its progress is resolved
         from the Trainer when a checkpoint is saved and restored by
-        Lightning on resume. Val/test are finite (``is_endless=False``) and
+        Lightning on resume. Val/test are finite (``loop_back=False``) and
         always start at shard 0 (their fixed ``seed`` shuffle is consumed in
         full on every pass, so no progress tracking is needed).
         """

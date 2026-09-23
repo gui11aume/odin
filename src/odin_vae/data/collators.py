@@ -2,10 +2,10 @@
 
 For each cluster in the batch the collator:
 
-1. draws ``k`` uniformly from ``1..k_input`` and samples ``k`` cells uniformly
+1. draws `k` uniformly from `1..k_input` and samples `k` cells uniformly
    at random -> encoder inputs (real patent families have one surface per
    member, from 1 upwards),
-2. samples ``k_latin_target`` latin cells + ``k_non_latin_target`` non-latin
+2. samples `k_latin_target` latin cells + `k_non_latin_target` non-latin
    cells -> decoder targets (stratified, disjoint from the inputs when the
    cluster is large enough; backfilled otherwise),
 3. flips a coin per target: with probability 1/2 the target is tag-primed
@@ -89,9 +89,9 @@ class OdinVAECollator:
     ) -> list[int]:
         """Sample exactly k cells.
 
-        Preference order: (1) cells of ``pool`` disjoint from ``used``,
-        (2) cells of ``fallback_pool`` disjoint from ``used``, (3) any cell
-        with overlap allowed. This guarantees exactly ``k`` targets per
+        Preference order: (1) cells of `pool` disjoint from `used`,
+        (2) cells of `fallback_pool` disjoint from `used`, (3) any cell
+        with overlap allowed. This guarantees exactly `k` targets per
         cluster even for degenerate clusters (few cells, one script only).
         """
         if k == 0 or not any_pool:
@@ -111,11 +111,11 @@ class OdinVAECollator:
     def _select(self, tags: list[str], n: int, rng: random.Random) -> tuple[list[int], list[int]]:
         """Return (input indices, target indices) for one cluster.
 
-        The number of inputs is drawn from ``1..k_input`` — uniformly by default,
-        or with the configured ``k_input_weights`` (a random subset of the
-        ``k_input`` candidates, so the disjointness from the targets —
+        The number of inputs is drawn from `1..k_input` — uniformly by default,
+        or with the configured `k_input_weights` (a random subset of the
+        `k_input` candidates, so the disjointness from the targets —
         computed against the full candidate set — is preserved).
-        The targets are always exactly ``k_latin_target + k_non_latin_target``
+        The targets are always exactly `k_latin_target + k_non_latin_target`
         (the model relies on a fixed count per cluster); each target keeps
         its own true script tag.
         """
@@ -146,12 +146,12 @@ class OdinVAECollator:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorized encode + pad, bit-identical to the per-string path.
 
-        Semantics matched to ``_tokenize``:
+        Semantics matched to `_tokenize`:
           * with_tag:  row = [tag_id] + enc(text), truncated to max_tokens
             (a tag counts against the budget, so text gets max_tokens - 1).
           * with_eos:  row = enc(text) truncated to max_tokens, then + eos.
         The returned width is the max row length in the batch (like the
-        legacy ``pad``), right-padded with pad_token_id, mask 1 on real tokens.
+        legacy `pad`), right-padded with pad_token_id, mask 1 on real tokens.
         """
         n = len(texts)
         if with_tag:

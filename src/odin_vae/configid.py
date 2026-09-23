@@ -1,19 +1,19 @@
 """Two-part architecture checksum (configid) for the Odin model.
 
-The full reference of a released model is ``<family>.<wiring>.<layout>.<gen>``,
-e.g. ``odin.7K2.M9Q.1``. The final ``<gen>`` (weight generation) is assigned
+The full reference of a released model is `<family>.<wiring>.<layout>.<gen>`,
+e.g. `odin.7K2.M9Q.1`. The final `<gen>` (weight generation) is assigned
 manually when a model is promoted for real use; it is not part of the
 checksum. During development, models keep their version names (v22, v23, ...).
 
 The checksum has two independently hashed parts:
 
 * **wiring** — which model it is: the architectural fields of
-  :class:`~odin_vae.config_classes.ConfigForModel` (``ARCH_FIELDS``) plus the
+  :class:`~odin_vae.config_classes.ConfigForModel` (`ARCH_FIELDS`) plus the
   architectural constants hardcoded in :class:`~odin_vae.model.OdinModel`
-  (``ARCH_CONSTANTS``). A change here means the computation graph changed.
-* **layout** — what the weights look like: the ``state_dict`` shape map
+  (`ARCH_CONSTANTS`). A change here means the computation graph changed.
+* **layout** — what the weights look like: the `state_dict` shape map
   (parameter/buffer name to shape, sorted). It captures everything that
-  defines the weight layout, including ``vocab_size``, which is not a config
+  defines the weight layout, including `vocab_size`, which is not a config
   field. Parameter names come from the modeling library, so a library upgrade
   that renames parameters changes the layout part.
 
@@ -24,30 +24,27 @@ Reading the two parts against each other:
   shapes (e.g. local-attention window, weight tying, T5 rel buckets);
 * both different: new architecture.
 
-The training harness stamps ``configid`` into each checkpoint's
-``hyper_parameters``; ``verify_configid`` uses the stamp to check the wiring
+The training harness stamps `configid` into each checkpoint's
+`hyper_parameters`; `verify_configid` uses the stamp to check the wiring
 part as well as the layout (older checkpoints without the stamp get the
 layout check only, since a state dict carries no wiring).
 
 The scheme is family-agnostic and meant to be reused verbatim for other
-models: the family name is not hashed. Bump ``SPEC_VERSION`` to invalidate
+models: the family name is not hashed. Bump `SPEC_VERSION` to invalidate
 all previously issued ids (the safe direction).
 
 Scheme definition (reproducible outside this repo):
 
-* wiring spec: the line ``SPEC_VERSION``, then one line ``F <field>=<value>``
-  per entry of ``ARCH_FIELDS`` (sorted by field name, Python ``str()`` of the
-  value), then one line ``C <name>=<value>`` per entry of ``ARCH_CONSTANTS``
+* wiring spec: the line `SPEC_VERSION`, then one line `F <field>=<value>`
+  per entry of `ARCH_FIELDS` (sorted by field name, Python `str()` of the
+  value), then one line `C <name>=<value>` per entry of `ARCH_CONSTANTS`
   (sorted by name).
-* layout spec: the line ``SPEC_VERSION``, then one line
-  ``S <name>=<d0,d1,...>`` per state-dict key (sorted by key name).
-* each part id: take the BLAKE2b digest of the spec (``digest_size=2``,
+* layout spec: the line `SPEC_VERSION`, then one line
+  `S <name>=<d0,d1,...>` per state-dict key (sorted by key name).
+* each part id: take the BLAKE2b digest of the spec (`digest_size=2`,
   big-endian integer), drop the least significant bit (15 bits), encode as
-  3 Crockford base32 characters (``0-9A-V``, no I/L/O/U), most significant
+  3 Crockford base32 characters (`0-9A-V`, no I/L/O/U), most significant
   digit first.
-
-The dotted form ``XXX.YYY`` can never be confused with legacy bare 4-char
-config codes, which are a single chunk of standard base32.
 """
 
 from __future__ import annotations
@@ -64,13 +61,13 @@ from .config_classes import ConfigForModel
 
 
 class _StateDictProvider(Protocol):
-    """Anything with a ``state_dict()`` (e.g. ``torch.nn.Module``)."""
+    """Anything with a `state_dict()` (e.g. `torch.nn.Module`)."""
 
     def state_dict(self) -> Mapping[str, torch.Tensor]: ...
 
 
 class _ConfiguredStateDictProvider(_StateDictProvider, Protocol):
-    """A model that also carries its :class:`ConfigForModel` (e.g. ``OdinModel``)."""
+    """A model that also carries its :class:`ConfigForModel` (e.g. `OdinModel`)."""
 
     config: ConfigForModel
 
@@ -143,17 +140,17 @@ def shape_map_of(model: _StateDictProvider) -> dict[str, tuple[int, ...]]:
 
 
 def configid(cfg: ConfigForModel, model: _StateDictProvider) -> str:
-    """The full ``<wiring>.<layout>`` checksum of a live model."""
+    """The full `<wiring>.<layout>` checksum of a live model."""
     return f"{wiring_id(cfg)}.{layout_id(shape_map_of(model))}"
 
 
 def configid_from_state_dict(cfg: ConfigForModel, state_dict: Mapping[str, torch.Tensor]) -> str:
-    """The ``<wiring>.<layout>`` checksum from a state dict (no model needed)."""
+    """The `<wiring>.<layout>` checksum from a state dict (no model needed)."""
     return f"{wiring_id(cfg)}.{layout_id({k: tuple(t.shape) for k, t in state_dict.items()})}"
 
 
 def _state_dict_of(ckpt: Any) -> dict:
-    """The model state dict of a checkpoint object, ``model.`` prefix stripped."""
+    """The model state dict of a checkpoint object, `model.` prefix stripped."""
     state = ckpt.get("state_dict", ckpt)
     prefix = "model."
     if state and all(str(k).startswith(prefix) for k in state):
@@ -162,7 +159,7 @@ def _state_dict_of(ckpt: Any) -> dict:
 
 
 def _stored_configid(ckpt: Any) -> str | None:
-    """The configid stamped in ``hyper_parameters`` (None for older checkpoints)."""
+    """The configid stamped in `hyper_parameters` (None for older checkpoints)."""
     hp = ckpt.get("hyper_parameters")
     if isinstance(hp, dict):
         value = hp.get("configid")
@@ -172,10 +169,10 @@ def _stored_configid(ckpt: Any) -> str | None:
 
 
 def configid_of_checkpoint(cfg: ConfigForModel, checkpoint: str | Path) -> str:
-    """The ``<wiring>.<layout>`` checksum of a Lightning checkpoint file.
+    """The `<wiring>.<layout>` checksum of a Lightning checkpoint file.
 
-    The wiring part comes from ``cfg`` (a state dict carries no wiring); the
-    layout part from the state-dict shapes. Strips the ``model.`` prefix used
+    The wiring part comes from `cfg` (a state dict carries no wiring); the
+    layout part from the state-dict shapes. Strips the `model.` prefix used
     by the training harness checkpoints.
     """
     ckpt = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
@@ -183,16 +180,16 @@ def configid_of_checkpoint(cfg: ConfigForModel, checkpoint: str | Path) -> str:
 
 
 def verify_configid(model: _ConfiguredStateDictProvider, checkpoint: str | Path) -> str:
-    """Check that ``checkpoint`` matches the architecture of ``model``.
+    """Check that `checkpoint` matches the architecture of `model`.
 
-    Returns the configid on success; raises ``ValueError`` naming the
+    Returns the configid on success; raises `ValueError` naming the
     mismatched part (wiring vs layout) otherwise. Call before loading
     weights so an architecture mismatch fails with a readable message
-    instead of a shape error deep in ``load_state_dict``.
+    instead of a shape error deep in `load_state_dict`.
 
     The layout part is always checked (state-dict shapes vs the model). The
     wiring part is checked when the checkpoint stores its own configid in
-    ``hyper_parameters`` (harnesses stamped on or after this change); older
+    `hyper_parameters` (harnesses stamped on or after this change); older
     checkpoints get the layout check only, since a state dict carries no
     wiring.
     """

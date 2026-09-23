@@ -1,7 +1,7 @@
 """Adapters between the webdataset stream and the collator.
 
-A shard sample is one cluster: ``{"__key__": str, "__url__": str,
-"json": bytes}`` where ``json`` holds ``{"tags": [...], "cells": [...]}``.
+A shard sample is one cluster: `{"__key__": str, "__url__": str,
+"json": bytes}` where `json` holds `{"tags": [...], "cells": [...]}`.
 The adapter parses and validates the record so that the collator receives
 plain Python data that can be batched directly (no intermediate lookup store).
 """

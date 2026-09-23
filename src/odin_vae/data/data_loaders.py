@@ -1,26 +1,26 @@
 """Data loader with checkpoint-resident shard progress.
 
-The loader is "stateful" in Lightning's sense (it defines ``state_dict`` and
-``load_state_dict``), so the shard progress is stored inside the training
-checkpoint and restored by Lightning itself on ``fit(ckpt_path=...)``:
+The loader is "stateful" in Lightning's sense (it defines `state_dict` and
+`load_state_dict`), so the shard progress is stored inside the training
+checkpoint and restored by Lightning itself on `fit(ckpt_path=...)`:
 
-- ``state_dict()`` (called in the main process when a checkpoint is saved):
-  resolves the current ``(processed_epochs, processed_samples)`` through
-  ``progress_fn`` (provided by the data module, backed by the Trainer),
+- `state_dict()` (called in the main process when a checkpoint is saved):
+  resolves the current `(processed_epochs, processed_samples)` through
+  `progress_fn` (provided by the data module, backed by the Trainer),
   pushes the resulting whole-shard offset to the dataset, and returns the
-  checkpoint state ``{"seed", "processed_epochs", "processed_samples"}``.
-- ``load_state_dict()`` (called by Lightning during ``setup_data()`` on
-  resume, before the first ``__iter__`` forks workers): validates the seed
+  checkpoint state `{"seed", "processed_epochs", "processed_samples"}`.
+- `load_state_dict()` (called by Lightning during `setup_data()` on
+  resume, before the first `__iter__` forks workers): validates the seed
   and the shard boundary, then pushes the offset to the dataset.
 
 Legacy checkpoints that predate this format (a seed-only state) leave a
-one-shot bootstrap flag: the next ``__iter__`` derives the progress from the
+one-shot bootstrap flag: the next `__iter__` derives the progress from the
 Trainer (the restored loop counters) exactly as the old pipeline did, and
 the flag self-extinguishes at the next checkpoint save.
 
 Workers receive the progress through the copy-on-write snapshot of the
 dataset taken at fork; the pipeline therefore requires
-``multiprocessing_context="fork"`` and ``persistent_workers=False``.
+`multiprocessing_context="fork"` and `persistent_workers=False`.
 """
 
 from __future__ import annotations
@@ -32,7 +32,11 @@ import torch
 
 
 class ProgressDataset(Protocol):
-    """Duck-typed dataset contract (provided by ``GrandWebDataset``)."""
+    """Duck-typed dataset contract (provided by `GrandWebDataset`).
+
+    Generic class that is used as a dataset for a DataLoader, providing
+    progress tracking with methods `set_progress()` and `progress()`.
+    """
 
     seed: int | None
 
@@ -44,20 +48,23 @@ class ProgressDataset(Protocol):
 class DataLoaderWithAutoCheckpoint(torch.utils.data.DataLoader):
     """DataLoader whose shard progress lives in the Lightning checkpoint.
 
-    Assumes that the dataset has:
+    A DataLoader always has a dataset and a collator. In this particular case,
+    the dataset is assumed to have:
 
-    - a ``set_progress(processed_epochs, processed_shards)`` method,
-    - a ``progress() -> (processed_epochs, processed_shards)`` method,
-    - a ``seed`` attribute (as provided by ``GrandWebDataset``).
+    - a `set_progress(processed_epochs, processed_shards)` method,
+    - a `progress() -> (processed_epochs, processed_shards)` method,
+    - a `seed` attribute (as provided by `GrandWebDataset`).
 
-    Args (beyond ``DataLoader``):
-        progress_fn: Callable returning ``(processed_epochs,
-            processed_samples)`` or ``None`` (e.g. outside a fit). Called
-            when a checkpoint is saved, and once at the first
-            ``__iter__()`` when resuming from a legacy seed-only
-            checkpoint.
+    Note that the dataset tracks progress in terms of shards, while the
+    DataLoader tracks progress in terms of samples. The conversion is done
+    by the `n_instances_per_shard` argument.
+
+    Args (beyond `DataLoader`):
+        progress_fn: Callable returning `(processed_epochs,
+            processed_samples)` or `None` (e.g. outside a fit). Called
+            when a checkpoint is saved.
         n_instances_per_shard: Uniform instances per shard; required for the
-            samples<->shards conversion and the shard-boundary validation.
+            samples-to-shards conversion and the shard-boundary validation.
     """
 
     def __init__(
@@ -76,14 +83,6 @@ class DataLoaderWithAutoCheckpoint(torch.utils.data.DataLoader):
         self._dataset: ProgressDataset = self.dataset  # type: ignore[assignment]
         self._progress_fn = progress_fn
         self._n_instances_per_shard = n_instances_per_shard
-        self._bootstrap_progress = False
-
-    def __iter__(self):
-        """Create a new iterator, bootstrapping progress once for legacy checkpoints."""
-        if self._bootstrap_progress:
-            self._bootstrap_progress = False
-            self._apply_progress(self._resolve_progress())
-        return super().__iter__()
 
     def _resolve_progress(self) -> tuple[int, int] | None:
         if self._progress_fn is None or self._n_instances_per_shard is None:
@@ -103,7 +102,6 @@ class DataLoaderWithAutoCheckpoint(torch.utils.data.DataLoader):
     def state_dict(self) -> dict:
         """Return the checkpoint state (called by Lightning when saving)."""
         self._apply_progress(self._resolve_progress())
-        self._bootstrap_progress = False
         state = {"seed": self._dataset.seed}
         if self._n_instances_per_shard is not None:
             epochs, shards = self._dataset.progress()
@@ -118,10 +116,6 @@ class DataLoaderWithAutoCheckpoint(torch.utils.data.DataLoader):
                 f"Checkpoint seed ({checkpoint['seed']}) does not match the configured seed "
                 f"({self._dataset.seed}); refusing to resume."
             )
-        if "processed_epochs" in checkpoint and "processed_samples" in checkpoint:
-            if self._n_instances_per_shard is None:
-                raise ValueError("Checkpoint carries shard progress, but this dataloader has no n_instances_per_shard.")
-            self._apply_progress((int(checkpoint["processed_epochs"]), int(checkpoint["processed_samples"])))
-        else:
-            # Legacy seed-only checkpoint: bootstrap from the Trainer next iteration.
-            self._bootstrap_progress = True
+        if self._n_instances_per_shard is None:
+            raise ValueError("Checkpoint carries shard progress, but this dataloader has no n_instances_per_shard.")
+        self._apply_progress((int(checkpoint["processed_epochs"]), int(checkpoint["processed_samples"])))
